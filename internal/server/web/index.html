@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>warden — fleet command</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="brand"><span class="dot"></span>warden <span class="sub">fleet command</span></div>
+  <div class="burn" id="burn">
+    <div class="burn-num"><span id="burn-net">$0.00</span><span class="burn-label">net today</span></div>
+    <div class="burn-detail" id="burn-detail">$0.00 gross · $0.00 saved</div>
+    <div class="burn-bar"><div id="burn-fill"></div></div>
+    <div class="burn-live"><span id="live-count">0</span> live</div>
+  </div>
+  <div class="head-actions">
+    <button id="export-btn" title="Download the audit trail as JSONL">export</button>
+    <button id="scan-btn" title="Run anomaly evaluation now">scan</button>
+    <input id="token" type="password" placeholder="token (if required)" autocomplete="off">
+  </div>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>live runs</h2>
+    <div id="runs-empty" class="empty">quiet — no runs right now</div>
+    <table id="runs"><thead><tr>
+      <th>agent</th><th>fleet</th><th>elapsed</th><th>tools</th><th>cost</th><th>doing</th><th></th>
+    </tr></thead><tbody></tbody></table>
+  </section>
+
+  <section class="panel">
+    <h2>approvals <span id="appr-count" class="badge"></span></h2>
+    <div id="approvals-empty" class="empty">none pending</div>
+    <ul id="approvals"></ul>
+  </section>
+
+  <section class="panel">
+    <h2>anomaly feed</h2>
+    <div id="alerts-empty" class="empty">quiet — no active alerts</div>
+    <ul id="alerts"></ul>
+  </section>
+</main>
+
+<div id="drawer" class="drawer hidden">
+  <div class="drawer-head">
+    <div><div id="drawer-title" class="mono"></div><div id="drawer-sub"></div></div>
+    <div>
+      <button id="drawer-kill" class="danger">kill run</button>
+      <button id="drawer-close">close</button>
+    </div>
+  </div>
+  <div id="drawer-body"></div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
