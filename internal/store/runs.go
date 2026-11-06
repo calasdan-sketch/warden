@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/model"
 )
 
 func nullStr(p *string) any {

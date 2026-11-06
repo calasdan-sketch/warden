@@ -1,0 +1,30 @@
+{
+  "name": "@decnutz/warden",
+  "version": "0.1.0",
+  "description": "Enterprise agent flight recorder — runtime supervisor for AI agent fleets. Audit everything, live fleet view, one-tap kill switch.",
+  "author": "Calas Automations Inc.",
+  "license": "MIT",
+  "homepage": "https://github.com/calasdan-sketch/warden#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/calasdan-sketch/warden.git"
+  },
+  "bugs": {
+    "url": "https://github.com/calasdan-sketch/warden/issues"
+  },
+  "keywords": ["ai", "agents", "security", "monitoring", "observability", "audit", "opentelemetry", "claude-code", "codex", "kill-switch"],
+  "bin": {
+    "warden": "bin/warden.js"
+  },
+  "files": ["bin/warden.js", "README.md", "LICENSE"],
+  "engines": {
+    "node": ">=16"
+  },
+  "os": ["linux", "darwin"],
+  "optionalDependencies": {
+    "@decnutz/warden-linux-x64": "0.1.0",
+    "@decnutz/warden-linux-arm64": "0.1.0",
+    "@decnutz/warden-darwin-x64": "0.1.0",
+    "@decnutz/warden-darwin-arm64": "0.1.0"
+  }
+}

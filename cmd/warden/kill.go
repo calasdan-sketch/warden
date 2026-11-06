@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/model"
 )
 
 func (a *app) cmdKill(args []string) int {

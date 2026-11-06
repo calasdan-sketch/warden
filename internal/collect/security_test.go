@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"warden/internal/model"
-	"warden/internal/receipt"
-	"warden/internal/store"
+	"github.com/calasdan-sketch/warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/receipt"
+	"github.com/calasdan-sketch/warden/internal/store"
 )
 
 // TestSocketPreDecidedStripped: the supervised agent inherits WARDEN_SOCK and

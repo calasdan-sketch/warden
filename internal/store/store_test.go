@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/model"
 )
 
 func openTest(t *testing.T) *Store {

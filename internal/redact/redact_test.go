@@ -133,3 +133,17 @@ func TestCredentialAdjacentBareSecretValue(t *testing.T) {
 		}
 	}
 }
+
+func TestCredentialAdjacentWindowsAndMore(t *testing.T) {
+	for _, p := range []string{`C:\Users\dan\.ssh\id_rsa`, `C:\Users\dan\.ssh\known_hosts`, "/home/u/.netrc",
+		"/home/u/.kube/config", "/home/u/.config/gcloud/application_default_credentials.json"} {
+		if !IsCredentialAdjacentPath(p) {
+			t.Errorf("%s should be credential-adjacent", p)
+		}
+	}
+	for _, p := range []string{`C:\src\main.go`, "src/environment.ts", "README.md"} {
+		if IsCredentialAdjacentPath(p) {
+			t.Errorf("%s should not be credential-adjacent", p)
+		}
+	}
+}

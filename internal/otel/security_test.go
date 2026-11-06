@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/model"
 )
 
 func testSpan(runID, name string) *model.Span {

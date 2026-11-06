@@ -10,24 +10,29 @@
 //	warden span | gate            framework hook emission / pre-exec policy check
 //	warden approve | approvals    human approval gates
 //	warden export | scan          SIEM export / run anomaly evaluation now
+//	warden hook claude-code|codex harness hook (PreToolUse gate + kill switch)
+//	warden demo                   self-contained 60-second tour
 package main
 
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
-	"warden/internal/anomaly"
-	"warden/internal/collect"
-	"warden/internal/join"
-	"warden/internal/kill"
-	"warden/internal/policy"
-	"warden/internal/receipt"
-	"warden/internal/store"
+	"github.com/calasdan-sketch/warden/internal/anomaly"
+	"github.com/calasdan-sketch/warden/internal/collect"
+	"github.com/calasdan-sketch/warden/internal/join"
+	"github.com/calasdan-sketch/warden/internal/kill"
+	"github.com/calasdan-sketch/warden/internal/otel"
+	"github.com/calasdan-sketch/warden/internal/policy"
+	"github.com/calasdan-sketch/warden/internal/receipt"
+	"github.com/calasdan-sketch/warden/internal/store"
 )
 
-const version = "0.1.0"
+// version is overridden at release build time: -ldflags "-X main.version=..."
+var version = "0.1.0"
 
 // app holds the wired dependencies for CLI commands.
 type app struct {
@@ -71,6 +76,8 @@ func openApp(dir, policyPath string) (*app, error) {
 		st.Close()
 		return nil, err
 	}
+	// Agents must never touch their supervisor's own state.
+	pol.Protect(dir, policyPath)
 	signer, err := receipt.LoadOrCreate(dir)
 	if err != nil {
 		st.Close()
@@ -123,6 +130,7 @@ func main() {
 		os.Exit(2)
 	}
 	cmd, rest := args[0], args[1:]
+	otel.ScopeVersion = version
 
 	// Commands that don't need the store.
 	switch cmd {
@@ -132,6 +140,21 @@ func main() {
 	case "help", "--help", "-h":
 		usage()
 		return
+	case "demo":
+		os.Exit(cmdDemo(rest))
+	case "verify":
+		// Bundle verification is for auditors: it must not need (or create)
+		// a warden data dir.
+		if b, pk, au, ok := bundleFlags(rest); ok {
+			os.Exit(cmdVerifyBundle(b, pk, au))
+		}
+	}
+
+	if cmd == "hook" {
+		// Hooks must fail CLOSED: harnesses treat a non-blocking error
+		// (exit 1, no JSON) as "go ahead". Every startup error and panic
+		// becomes a deny in the harness's protocol.
+		os.Exit(runHookFailClosed(dir, policyPath, rest))
 	}
 
 	a, err := openApp(dir, policyPath)
@@ -180,22 +203,40 @@ func usage() {
 
 Usage: warden [--dir DIR] [--policy FILE] <command> [flags]
 
+  demo                    60-second self-contained tour (temp dir, no network, no keys)
   wrap -- <cmd...>        Run a command as a supervised run (policy-gated, receipt-sealed)
+  hook claude-code|codex  Harness hook: gate each tool call, record it, honor the kill switch
+                          (--print-config prints the settings snippet to paste)
   dashboard               Serve the Fleet Command view (burn bar, runs, kill, anomalies)
   kill                    Kill switch: --scope run|agent|fleet|tool --target X --reason R
   report                  Ingest --report-to JSONL: --from shortleash|planok|mcp-jail|calas-gateway
-  verify                  Verify receipt signatures and the hash chain
+  verify                  Verify receipt signatures, the hash chain and each signed trace
+                          (--bundle FILE --pubkey KEY verifies an export, no data dir needed)
   span                    Emit one span (framework hooks; uses WARDEN_RUN_ID/WARDEN_SOCK)
   gate                    Pre-execution policy check for hooks (use --await to block on approval)
   approve                 Decide a pending approval: --id N --decision approved|denied
   approvals               List pending approvals
-  export                  Stream the audit trail as JSONL (SIEM sink)
+  export                  Audit trail: --format jsonl (verifiable bundle) | otlp [--endpoint URL]
   scan                    Run anomaly evaluation over live runs now
   init                    Initialize the data dir (policy template + signing key)
   version                 Print version
 
 Global flags: --dir DIR (default ~/.warden, or $WARDEN_DIR), --policy FILE
 `)
+}
+
+// bundleFlags extracts --bundle/--pubkey for store-less verification.
+func bundleFlags(args []string) (bundle, pubkey string, allowUnsigned, ok bool) {
+	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	b := fs.String("bundle", "", "")
+	p := fs.String("pubkey", "", "")
+	au := fs.Bool("allow-unsigned", false, "")
+	_ = fs.String("run", "", "")
+	if err := fs.Parse(args); err != nil || *b == "" {
+		return "", "", false, false
+	}
+	return *b, *p, *au, true
 }
 
 func newFlagSet(name string) *flag.FlagSet {

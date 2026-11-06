@@ -18,13 +18,13 @@ import (
 	"strings"
 	"time"
 
-	"warden/internal/anomaly"
-	"warden/internal/collect"
-	"warden/internal/join"
-	"warden/internal/kill"
-	"warden/internal/model"
-	"warden/internal/otel"
-	"warden/internal/store"
+	"github.com/calasdan-sketch/warden/internal/anomaly"
+	"github.com/calasdan-sketch/warden/internal/collect"
+	"github.com/calasdan-sketch/warden/internal/join"
+	"github.com/calasdan-sketch/warden/internal/kill"
+	"github.com/calasdan-sketch/warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/otel"
+	"github.com/calasdan-sketch/warden/internal/store"
 )
 
 //go:embed web/*

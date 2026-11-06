@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"warden/internal/model"
-	"warden/internal/policy"
+	"github.com/calasdan-sketch/warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/policy"
 )
 
 // KillGrace is the SIGTERM grace period before SIGKILL (blueprint: 10s).
@@ -210,12 +210,21 @@ func (r *Runner) Shutdown(reason, actor string) error {
 	r.mu.Unlock()
 
 	if r.cmd.Process != nil && r.pgid > 0 {
+		deadline := time.Now().Add(KillGrace)
 		_ = syscall.Kill(-r.pgid, syscall.SIGTERM)
 		select {
 		case <-r.waitDone:
 		case <-time.After(KillGrace):
 			_ = syscall.Kill(-r.pgid, syscall.SIGKILL)
 			<-r.waitDone
+		}
+		// The direct child exiting is not the whole tree: other members of
+		// the process group may still be shutting down (or ignoring
+		// SIGTERM). Wait out the rest of the grace for the group, then
+		// SIGKILL whatever is left, so "killed" means the tree is gone.
+		if !waitGroupGone(r.pgid, time.Until(deadline)) {
+			_ = syscall.Kill(-r.pgid, syscall.SIGKILL)
+			waitGroupGone(r.pgid, 2*time.Second)
 		}
 	}
 
@@ -309,4 +318,18 @@ func ReadPidFile(dataDir, runID string) (*PidFile, error) {
 		return nil, err
 	}
 	return &pf, nil
+}
+
+// waitGroupGone polls until no process remains in group pgid (ESRCH).
+func waitGroupGone(pgid int, d time.Duration) bool {
+	end := time.Now().Add(d)
+	for {
+		if err := syscall.Kill(-pgid, 0); err == syscall.ESRCH {
+			return true
+		}
+		if time.Now().After(end) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

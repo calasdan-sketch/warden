@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/model"
 )
 
 // TestToolDenyCaseInsensitive: the dynamic deny-list must be case-insensitive

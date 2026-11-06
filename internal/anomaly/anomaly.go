@@ -19,9 +19,9 @@ import (
 	"strings"
 	"time"
 
-	"warden/internal/model"
-	"warden/internal/redact"
-	"warden/internal/store"
+	"github.com/calasdan-sketch/warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/redact"
+	"github.com/calasdan-sketch/warden/internal/store"
 )
 
 // Rule names (stable identifiers used in fingerprints and the API).

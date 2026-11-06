@@ -3,7 +3,7 @@ package store
 import (
 	"time"
 
-	"warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/model"
 )
 
 // schemaV2 adds the heartbeat column used to detect runs that died without
@@ -13,6 +13,13 @@ const schemaV2 = `ALTER TABLE runs ADD COLUMN last_heartbeat TEXT;`
 // schemaV3 stores the sealed status on the receipt row for cheap reads
 // (the canonical status also lives inside the signed body).
 const schemaV3 = `ALTER TABLE receipts ADD COLUMN status TEXT NOT NULL DEFAULT '';`
+
+// schemaV4 marks spans that arrived after their run was sealed: they stay in
+// the audit trail but are not covered by the receipt's signed trace digest.
+const schemaV4 = `ALTER TABLE spans ADD COLUMN late INTEGER NOT NULL DEFAULT 0;`
+
+// schemaV5 stores the harness tool-use id (exported as gen_ai.tool.call.id).
+const schemaV5 = `ALTER TABLE spans ADD COLUMN tool_call_id TEXT NOT NULL DEFAULT '';`
 
 // TouchHeartbeat marks a run alive.
 func (s *Store) TouchHeartbeat(runID string) error {
