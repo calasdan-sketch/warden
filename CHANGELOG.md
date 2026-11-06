@@ -5,6 +5,56 @@
 The first build intended for npm with real binaries. `@decnutz/warden@0.0.1`
 on npm is an empty placeholder.
 
+### Security (panel review fixes, 2026-11-06)
+- **CRITICAL: shell allowlist bypasses closed (also under `--strict`).**
+  - `env`/`sudo` options are parsed exactly. Before, `env -i rm …` and
+    `sudo -E rm …` hid `rm`. Now `env -S`, `sudo -s`, `sudo -i` and unknown
+    options are denied.
+  - Path-qualified programs (`./git`, `/tmp/git`) only match the allowlist
+    from `/bin`, `/usr/bin`, `/sbin` or `/usr/sbin`, or as an exact
+    allowlisted path.
+  - Assigning or exporting `PATH`, `LD_*`, `DYLD_*`, `GIT_*`, `HOME`,
+    `BASH_ENV`, `PYTHON*`, `NODE_*`, `WARDEN_*` and similar is denied.
+  - Known git code-execution options are denied: `-c`, `--config-env`,
+    `--exec-path`, `clone -u`, `rebase -x`, `config`, `submodule`, and so on.
+  - Agents may not run `warden` itself.
+- **Breaking: the default allowlist no longer contains `python3`, `node`,
+  `npm`, `go` or `curl`.** Interpreters run arbitrary code, and curl bypasses
+  the egress policy. Existing `policy.yaml` files are not rewritten; review
+  yours.
+- **CRITICAL: `warden hook` fails closed on every startup error and panic**
+  (unreadable data dir, broken policy, locked DB): it answers deny or exits 2.
+  Before, it exited 1, which harnesses treat as "proceed". `--fail-open`
+  remains an explicit opt-out.
+- **warden protects its own files.** Tool calls that write or mention warden's
+  data dir, policy file, `warden.db` or `receipt.key` are denied, as are
+  writes to `.claude/settings*.json`, `.codex/hooks.json` and
+  `.codex/config.toml`. Globs and brace expansion are covered, including paths
+  inside interpreter code and after redirections.
+- **HIGH: credential directories** (`.ssh`, `.aws`, `.gnupg`, `.kube`,
+  `.warden`, …) now match as path components, with or without a trailing
+  slash, and through globs (`id_rs?`). The threat model now states plainly
+  that a separate OS user or an external chain anchor is the real protection
+  for the signing key.
+- **MEDIUM: `verify --bundle` checks every receipt header field** against the
+  signed body, including `key_id`. It rejects unknown record types and lists
+  every unsigned record (late spans, spans without a receipt, run and
+  kill-audit rows) as `UNSIGNED`. Unsigned spans fail the check unless
+  `--allow-unsigned` is passed. Store `verify` also checks the stored status
+  against the body.
+- **LOW:**
+  - rm flags are normalized before deny patterns run (`rm -r -f /`,
+    `rm -fr /`, `rm --recursive --force /`), and recursive force-deletes of
+    `/`, `~` and `$HOME` are always denied.
+  - The npm launcher forwards SIGINT, SIGTERM, SIGHUP and SIGQUIT to warden,
+    so receipts still seal.
+  - The hook records `tool_use_id`, exported as `gen_ai.tool.call.id`
+    (schema v5).
+- **Codex hooks checked against the [official docs](https://learn.chatgpt.com/docs/hooks).**
+  Codex has `SessionEnd`, so `Stop` no longer seals a run per turn, and
+  `--print-config` uses `SessionEnd`. `apply_patch` is judged per file
+  touched. Relative paths are resolved against the hook's `cwd`.
+
 ### Added
 - **Signed trace digests.** Every receipt now commits to a digest of all spans
   the run recorded before its seal (`span_count`, `spans_digest`,

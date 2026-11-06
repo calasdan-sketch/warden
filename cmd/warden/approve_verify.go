@@ -105,7 +105,12 @@ func (a *app) cmdVerify(args []string) int {
 
 // cmdVerifyBundle verifies an exported JSONL audit bundle without touching
 // any warden data dir: what a third-party auditor (or the SIEM side) runs.
-func cmdVerifyBundle(path, pubPath string) int {
+//
+// Records that no signature covers (late spans, spans of runs without a
+// receipt, run/kill_audit summary rows) are listed one by one, and make the
+// check fail unless allowUnsigned: an auditor must not read "verified" over
+// content an attacker could have added.
+func cmdVerifyBundle(path, pubPath string, allowUnsigned bool) int {
 	if pubPath == "" {
 		fmt.Fprintln(os.Stderr, "verify: --bundle requires --pubkey (the operator's receipt.pub, obtained out of band;"+
 			" a key shipped inside the bundle proves nothing)")
@@ -126,19 +131,32 @@ func cmdVerifyBundle(path, pubPath string) int {
 		defer f.Close()
 		r = f
 	}
-	items, hdr, err := audit.ReadBundle(r)
+	b, err := audit.ReadBundle(r)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "verify: bundle:", err)
 		return 1
 	}
-	if hdr != nil && hdr.KeyID != "" && hdr.KeyID != receipt.KeyIDOf(pub) {
-		fmt.Printf("note: bundle says it was sealed by key %s; you supplied key %s\n", hdr.KeyID, receipt.KeyIDOf(pub))
+	if b.Header != nil && b.Header.KeyID != "" && b.Header.KeyID != receipt.KeyIDOf(pub) {
+		fmt.Printf("note: bundle says it was sealed by key %s; you supplied key %s\n", b.Header.KeyID, receipt.KeyIDOf(pub))
 	}
-	rep := audit.Verify(items, pub)
-	if err := audit.CheckHeader(hdr, items, pub); err != nil {
-		rep.Problems = append(rep.Problems, "header: "+err.Error())
+	rep := audit.VerifyBundle(b, pub)
+	code := printReport(rep)
+	if code == 0 && hasUnsignedContent(rep) && !allowUnsigned {
+		fmt.Println("FAIL bundle contains content no signature covers (listed above); re-run with --allow-unsigned to accept it as unverified")
+		return 1
 	}
-	return printReport(rep)
+	return code
+}
+
+// hasUnsignedContent ignores the run/kill_audit summary rows every export
+// carries; spans outside any signature are what matter.
+func hasUnsignedContent(rep *audit.Report) bool {
+	for _, u := range rep.Unsigned {
+		if strings.HasPrefix(u, "span ") {
+			return true
+		}
+	}
+	return false
 }
 
 func filterChain(ps []string) []string {
@@ -171,8 +189,11 @@ func printReport(rep *audit.Report) int {
 	if rep.LegacyNoTrc > 0 {
 		fmt.Printf("note: %d receipt(s) predate trace digests: their totals are signed, their individual spans are not\n", rep.LegacyNoTrc)
 	}
-	if rep.LateSpans > 0 {
-		fmt.Printf("note: %d span(s) arrived after their run was sealed: kept in the audit trail, not covered by a signature\n", rep.LateSpans)
+	for _, u := range rep.Unsigned {
+		fmt.Println("UNSIGNED", u)
+	}
+	if len(rep.Unsigned) > 0 {
+		fmt.Printf("note: %d UNSIGNED item(s) above are not covered by any signature; do not treat them as evidence\n", len(rep.Unsigned))
 	}
 	if !rep.OK() {
 		return 1

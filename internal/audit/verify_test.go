@@ -59,15 +59,11 @@ func writeBundle(t *testing.T, s *receipt.Signer, items []Item) []byte {
 
 func verifyBundle(t *testing.T, s *receipt.Signer, b []byte) *Report {
 	t.Helper()
-	items, hdr, err := ReadBundle(bytes.NewReader(b))
+	bun, err := ReadBundle(bytes.NewReader(b))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rep := Verify(items, s.PublicKey())
-	if err := CheckHeader(hdr, items, s.PublicKey()); err != nil {
-		rep.Problems = append(rep.Problems, err.Error())
-	}
-	return rep
+	return VerifyBundle(bun, s.PublicKey())
 }
 
 func TestBundleRoundTripVerifies(t *testing.T) {
@@ -134,8 +130,8 @@ func TestLateSpansReportedNotFatal(t *testing.T) {
 	items[0].Spans = append(items[0].Spans, &model.Span{SpanID: "late1", RunID: items[0].Receipt.RunID,
 		Kind: model.SpanToolCall, Tool: "mcp", StartedAt: time.Now(), LateAfterSeal: true})
 	rep := verifyBundle(t, s, writeBundle(t, s, items))
-	if !rep.OK() || rep.LateSpans != 1 {
-		t.Fatalf("late span must be reported but not fail: %+v", rep)
+	if !rep.OK() || rep.LateSpans != 1 || len(rep.Unsigned) != 1 || !strings.Contains(rep.Unsigned[0], "late1") {
+		t.Fatalf("late span must be listed as unsigned (not fail the signatures): %+v", rep)
 	}
 }
 
@@ -173,11 +169,52 @@ func TestLegacyReceiptWithoutTraceStillVerifies(t *testing.T) {
 }
 
 func TestReadBundleRejectsGarbage(t *testing.T) {
-	if _, _, err := ReadBundle(strings.NewReader("{not json\n")); err == nil {
+	if _, err := ReadBundle(strings.NewReader("{not json\n")); err == nil {
 		t.Error("garbage line accepted")
 	}
 	huge := `{"type":"span","span":{"name":"` + strings.Repeat("x", MaxBundleLine+10) + `"}}`
-	if _, _, err := ReadBundle(strings.NewReader(huge)); err == nil {
+	if _, err := ReadBundle(strings.NewReader(huge)); err == nil {
 		t.Error("oversized line accepted")
+	}
+}
+
+// Regression for the synapse-1 panel review: header fields beside the signed
+// body, orphan spans and unparsed record types were passed over.
+func TestBundleHeaderEditsAndUnsignedRecords(t *testing.T) {
+	s, _ := receipt.Generate()
+	items := buildChain(t, s, 2)
+	clean := string(writeBundle(t, s, items))
+	for name, mut := range map[string][2]string{
+		"status":      {`"status":"killed_operator","started_at"`, `"status":"completed","started_at"`},
+		"kill_reason": {`"kill_reason":"stop <now> & audit","body_hash"`, `"kill_reason":"routine","body_hash"`},
+		"agent_id":    {`"run_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","agent_id":"agent"`, `"run_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","agent_id":"other"`},
+		"cost":        {`"cost_usd":0,"tool_calls":0,"kill_reason"`, `"cost_usd":0.5,"tool_calls":0,"kill_reason"`},
+	} {
+		// Edit only the receipt HEADER (first occurrence on a receipt line), not the body.
+		var out []string
+		done := false
+		for _, l := range strings.Split(clean, "\n") {
+			if !done && strings.Contains(l, `"type":"receipt"`) && strings.Contains(l, mut[0]) {
+				l = strings.Replace(l, mut[0], mut[1], 1)
+				done = true
+			}
+			out = append(out, l)
+		}
+		if !done {
+			t.Fatalf("%s: mutation did not apply", name)
+		}
+		if rep := verifyBundle(t, s, []byte(strings.Join(out, "\n"))); rep.OK() {
+			t.Errorf("%s: edited receipt header not detected", name)
+		}
+	}
+	orphan := clean + `{"type":"span","span":{"span_id":"fake","run_id":"nosuchrun","kind":"tool.call","tool":"bash","started_at":"2026-11-05T12:00:00Z"}}` + "\n" +
+		`{"type":"run","run":{"run_id":"x"}}` + "\n" + `{"type":"kill_audit","kill":{"id":1}}` + "\n"
+	rep := verifyBundle(t, s, []byte(orphan))
+	joined := strings.Join(rep.Unsigned, "|")
+	if !strings.Contains(joined, "fake") || !strings.Contains(joined, "run record") || !strings.Contains(joined, "kill_audit") {
+		t.Errorf("orphan span / run / kill_audit must be listed as unsigned: %v", rep.Unsigned)
+	}
+	if _, err := ReadBundle(strings.NewReader(clean + `{"type":"mystery"}` + "\n")); err == nil {
+		t.Error("unknown record type must be rejected")
 	}
 }

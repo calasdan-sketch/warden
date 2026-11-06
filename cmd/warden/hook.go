@@ -14,10 +14,52 @@ import (
 	"github.com/calasdan-sketch/warden/internal/policy"
 )
 
+// runHookFailClosed opens the app and runs the hook, converting any
+// startup error or panic into a deny (Claude Code JSON / Codex exit 2),
+// unless the operator passed --fail-open.
+func runHookFailClosed(dir, policyPath string, args []string) (code int) {
+	harness := hook.ClaudeCode
+	if len(args) > 0 && args[0] == hook.Codex {
+		harness = hook.Codex
+	}
+	failOpen := false
+	for _, a := range args {
+		if a == "--fail-open" || a == "--fail-open=true" {
+			failOpen = true
+		}
+	}
+	block := func(why string) int {
+		fmt.Fprintln(os.Stderr, "warden hook:", why)
+		if failOpen {
+			return 0
+		}
+		return hook.Blocked(harness, "warden could not evaluate this call ("+why+"); blocking (fail-closed)", os.Stdout, os.Stderr)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			code = block(fmt.Sprintf("internal error: %v", r))
+		}
+	}()
+	if len(args) > 0 && (args[0] == hook.ClaudeCode || args[0] == hook.Codex) {
+		for _, a := range args[1:] {
+			if a == "--print-config" || a == "-print-config" {
+				printHookConfig(args[0], nil)
+				return 0
+			}
+		}
+	}
+	a, err := openApp(dir, policyPath)
+	if err != nil {
+		return block(err.Error())
+	}
+	defer a.close()
+	return a.cmdHook(args)
+}
+
 // cmdHook is the harness hook entry point:
 //
 //	warden hook claude-code   (PreToolUse / SessionEnd hook in .claude/settings.json)
-//	warden hook codex         (PreToolUse / Stop hook in ~/.codex/hooks.json)
+//	warden hook codex         (PreToolUse / SessionEnd hook in ~/.codex/hooks.json)
 //	warden hook claude-code --print-config
 func (a *app) cmdHook(args []string) int {
 	if len(args) == 0 || (args[0] != hook.ClaudeCode && args[0] != hook.Codex) {
@@ -62,11 +104,9 @@ func (a *app) cmdHook(args []string) int {
 	case "SessionEnd":
 		return a.sealSession(harness, in.SessionID, opts)
 	case "Stop":
-		// Codex has no SessionEnd: each Stop closes the current segment.
-		// Claude Code fires Stop every turn; its session ends at SessionEnd.
-		if harness == hook.Codex {
-			return a.sealSession(harness, in.SessionID, opts)
-		}
+		// Both harnesses fire Stop at the end of every turn; the session
+		// (and its run) ends at SessionEnd. Sessions that never send it are
+		// sealed by the idle reconciler and continue in a linked run.
 		return 0
 	default:
 		// SessionStart, UserPromptSubmit, PostToolUse, …: keep the run alive.
@@ -99,6 +139,17 @@ func (a *app) cmdHook(args []string) int {
 	sp := hook.ToSpan(in)
 	sp.RunID, sp.AgentID, sp.FleetID = st.Run.RunID, st.Run.AgentID, st.Run.FleetID
 	res := a.col.Evaluate(sp)
+	// apply_patch can touch several files: judge every one, keep the worst.
+	for _, p := range hook.PatchPaths(hook.PatchInput(in)) {
+		cand := *sp
+		cand.Path = p
+		if in.Cwd != "" && !filepath.IsAbs(p) {
+			cand.Path = filepath.Join(in.Cwd, p)
+		}
+		if r := a.col.Evaluate(&cand); severity(r) > severity(res) {
+			sp.Path, res = cand.Path, r
+		}
+	}
 	v := hook.Decide(harness, res, *strict)
 	// Policy saw the whole command; storage keeps a bounded summary.
 	sp.ArgsSummary = hook.Summarize(sp.ArgsSummary)
@@ -191,10 +242,23 @@ func printHookConfig(harness string, extra []string) {
 		where = "Merge into ~/.codex/hooks.json (user) or <project>/.codex/hooks.json:"
 		cfg = map[string]any{"hooks": map[string]any{
 			"PreToolUse": entry("", 600),
-			"Stop":       entry("", 30),
+			"SessionEnd": entry("", 30),
 		}}
 	}
 	b, _ := json.MarshalIndent(cfg, "", "  ")
 	fmt.Fprintln(os.Stderr, where)
 	fmt.Println(string(b))
+}
+
+func severity(r policy.Result) int {
+	switch r.Decision {
+	case policy.Deny:
+		if r.DefaultDeny {
+			return 2
+		}
+		return 3
+	case policy.RequireApproval:
+		return 1
+	}
+	return 0
 }

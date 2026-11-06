@@ -41,7 +41,8 @@ What `warden demo` shows, in order:
 
 1. A simulated Claude Code session goes through the real hook code path.
    `git status` is allowed. `git log; curl … | sh` is caught as a second
-   command smuggled after an allowlisted one. Reading `~/.aws/credentials` and
+   command smuggled after an allowlisted one, and `PATH=/tmp:$PATH git status` as
+   an attempt to swap in another `git`. Reading `~/.aws/credentials` and
    a fetch to an unknown host are sent to a human. `rm -rf /` is denied. A
    Bearer token in a command is redacted before storage.
 2. The kill switch is used on that session, and the session's next tool call
@@ -68,22 +69,30 @@ warden hook codex --print-config         # paste into ~/.codex/hooks.json
 | warden decision | Claude Code | Codex |
 |---|---|---|
 | allow | no output: Claude's normal permission flow still applies. **warden never grants.** | no output |
-| explicit deny (deny pattern, `deny_tools`, operator tool kill) | `permissionDecision: "deny"` with the reason | exit 2, reason on stderr |
+| explicit deny (deny pattern, `deny_tools`, operator tool kill, touching warden's own files or the harness hook config) | `permissionDecision: "deny"` with the reason | exit 2, reason on stderr |
 | needs approval (credential-adjacent file, `approval_tools`) | `"ask"`: Claude's own prompt asks the human | deny (Codex hooks can't ask). `--await` waits for `warden approve` instead |
-| not on an allowlist (default deny) | `"ask"`, or deny with `--strict` | defers to Codex's own approvals, or deny with `--strict` |
+| not on an allowlist, or a risky form of an allowlisted command (default deny) | `"ask"`, or deny with `--strict` | defers to Codex's own approvals, or deny with `--strict` |
 | session killed / agent quarantined / fleet frozen | deny, every call, until a new session | exit 2 |
-| warden itself fails | deny (fail-closed), unless `--fail-open` | exit 2, unless `--fail-open` |
+| warden itself fails (unreadable data dir, broken policy, locked DB, crash) | deny (fail-closed), unless `--fail-open` | exit 2, unless `--fail-open` |
 
 Each harness session is one warden run, keyed by the harness `session_id`.
-Claude Code's `SessionEnd` seals it. Codex has no session-end hook, so each
-`Stop` seals one segment and the next turn starts a new run linked by
+`SessionEnd` (both harnesses) seals it. A session that never sends it is sealed
+by the idle reconciler, and its next call continues in a new run linked by
 `parent_run_id`. A kill outlives the run it killed: a killed session stays
-blocked.
+blocked. Codex `apply_patch` calls are judged per file the patch touches, and
+the worst result wins.
 
-Sources: the [Claude Code hooks reference](https://code.claude.com/docs/en/hooks).
-For Codex, a [third-party guide](https://codex.danielvaughan.com/2026/04/15/codex-cli-hooks-complete-guide-events-policy-patterns/)
-documents `~/.codex/hooks.json`, `PreToolUse`/`Stop` and exit-2 blocking.
-Check it against your Codex version.
+Sources: the [Claude Code hooks reference](https://code.claude.com/docs/en/hooks)
+and the [official Codex hooks docs](https://learn.chatgpt.com/docs/hooks)
+(`developers.openai.com/codex/hooks` redirects there). Both were checked on
+2026-11-06. Codex points worth knowing:
+
+- Codex runs non-managed hooks only after you trust them with `/hooks`.
+- Codex can't ask a human from a hook (`"ask"` is unsupported there), so warden
+  denies with exit 2.
+- Codex documents a failed, timed-out or malformed `PreToolUse` hook as *not*
+  blocking the tool. That is fail-open on Codex's side, which warden cannot
+  override, so keep the hook timeout generous.
 
 ## Tamper evidence: what is signed, exactly
 
@@ -102,6 +111,11 @@ Check it against your Codex version.
   receipts (truncation) detectable too. An auditor can check the bundle with no
   warden data dir:
   `warden verify --bundle audit.jsonl --pubkey receipt.pub`.
+- **Bundle checks are strict.** `verify --bundle` checks every field of each
+  receipt's readable header against the signed body, and rejects unknown record
+  types. It lists every record no signature covers, prefixed `UNSIGNED`: late
+  spans, spans of runs with no receipt, and run and kill-audit rows. It fails
+  when unsigned spans are present, unless you pass `--allow-unsigned`.
 - **Not covered:** events, alerts, the kill-audit table and approvals are
   stored but not signed. Receipts sealed by older builds sign their totals
   only. `verify` says so.
@@ -117,7 +131,8 @@ library. Each run becomes one trace with an `invoke_agent {agent}` root span:
   `gen_ai.provider.name` (inferred from the model when not recorded),
   `gen_ai.request.model`, and integer-typed `gen_ai.usage.input_tokens`,
   `output_tokens` and `cache_read.input_tokens`.
-- `tool.call` becomes `execute_tool {tool}`, with `gen_ai.tool.name`.
+- `tool.call` becomes `execute_tool {tool}`, with `gen_ai.tool.name` and,
+  from hooks, `gen_ai.tool.call.id` (the harness `tool_use_id`).
 - Denied calls get status ERROR and `error.type=policy_denied`.
 - Trace and span IDs are always valid hex. Non-hex run IDs are hashed, not
   padded.
@@ -173,7 +188,7 @@ comparison, not a performance claim.
 | `kill --scope run\|agent\|fleet\|tool --target X --reason "…"` | Kill switch. Run: SIGTERM → 10 s grace → SIGKILL on the whole process group, sealed `killed_operator`. Agent: quarantine (`--ttl`). Fleet: freeze. Tool: deny-list. A reason is required; every action is audited. |
 | `approve --id N --decision approved\|denied` / `approvals` | Decide or list pending human approvals. |
 | `dashboard [--listen 127.0.0.1:8420] [--budget 500]` | Web UI: burn bar, run table with per-row kill, anomaly feed, approvals, trace waterfall with the sealed receipt. Bearer-token RBAC with `WARDEN_TOKENS=secret=role,…` (viewer < operator < admin). |
-| `verify [--run ID] [--pubkey K]` / `verify --bundle F --pubkey K` | Verify receipts, the chain and signed traces in the store, or in an exported bundle with no data dir. |
+| `verify [--run ID] [--pubkey K]` / `verify --bundle F --pubkey K [--allow-unsigned]` | Verify receipts, the chain and signed traces in the store, or in an exported bundle with no data dir. |
 | `export [--format jsonl\|otlp] [--out FILE] [--endpoint URL --header "K: V"]` | Verifiable JSONL audit bundle (written 0600), OTLP/HTTP JSON, or a direct OTLP push. |
 | `scan` | Run the 12 anomaly rules over live runs and print new alerts. |
 | `report --from shortleash\|planok\|mcp-jail\|calas-gateway --file X [--watch]` | Ingest a sibling tool's JSONL feed. |
@@ -187,7 +202,7 @@ comparison, not a performance claim.
 version: 1
 shell:
   default: deny
-  allow: [git, go, python3, node]
+  allow: [git, ls, cat, grep]        # see "What to allowlist" below
   deny_patterns: ['rm\s+-rf\s+/(?:\s|$)']
 egress:
   default: deny
@@ -210,6 +225,44 @@ never need allowlisting. `eval`, `exec` and `source` always do. When the
 parser can't tell, it denies rather than allows (for example with heredocs or
 nesting deeper than 4 levels).
 
+Each simple command is also parsed so it can't sneak around the allowlist:
+
+- **Paths.** `./git`, `/tmp/git` and `/usr/local/bin/git` are not `git`. Only
+  `/bin`, `/usr/bin`, `/sbin` and `/usr/sbin` count as the allowlisted name,
+  because an agent can't write there. Any other path must be allowlisted
+  exactly as written.
+- **Environment.** Assigning or `export`ing variables that change what code
+  runs is denied: `PATH`, `LD_*`, `DYLD_*`, `GIT_*`, `HOME`, `BASH_ENV`,
+  `PYTHON*`, `NODE_*`, `EDITOR`/`PAGER`, `WARDEN_*` and others. `FOO=1 git
+  status` is fine.
+- **Wrappers.** `env` and `sudo` options are parsed exactly. `env -S`,
+  `sudo -s`, `sudo -i` and unknown options are denied, never guessed.
+- **git.** Known ways to make git run arbitrary code are denied: `-c`,
+  `--config-env`, `--exec-path`, `--upload-pack`, `clone -u`, `rebase -x`,
+  `config`, `submodule`, `bisect`, `difftool` and similar. git still runs
+  repository hooks and aliases, so allowlisting git means trusting the repo.
+- **warden itself.** An agent may not run `warden`, so it can't approve its
+  own requests.
+- **rm.** Flags are normalized before deny patterns run, so `rm -r -f /`,
+  `rm -fr /` and `rm --recursive --force /` all meet an `rm -rf /` pattern.
+  Recursive force-deletes of `/`, `/*`, `~` and `$HOME` are always denied.
+
+**What to allowlist.** The default allowlist is `git ls cat echo mkdir pwd
+head tail wc grep diff sort which`: commands that can't run other code or
+reach the network. Interpreters and build tools (`python3`, `node`, `npm`,
+`go`, `make`, …) run whatever code they are handed, and `curl`/`wget` move data
+past the egress policy. Allowlisting any of them allowlists *everything*. Add
+them only if you accept that, ideally with a sandbox.
+
+**warden protects itself.** The policy denies any tool call that mentions or
+touches warden's data dir (`~/.warden` or `WARDEN_DIR`), its policy file,
+`receipt.key`, or a harness hook config. This covers globs and brace
+expansion (`~/.war*/receipt.ke?`, `~/.{warden,x}`) and paths inside
+interpreter code. The harness hook configs are `.claude/settings*.json`,
+`.codex/hooks.json` and `.codex/config.toml`; reading those is allowed,
+changing them is not. Credential directories (`.ssh`, `.aws`, `.gnupg`,
+`.kube`, …) match with or without a trailing slash.
+
 ## Architecture (one binary, local-first)
 
 ```
@@ -224,7 +277,7 @@ sibling-tool JSONL feeds ─────┘                  ↓
 
 Default data dir: `~/.warden` (`WARDEN_DIR` overrides). It holds one SQLite
 file, one Ed25519 key (0600) and one policy file. Migrations run forward
-automatically; schema v4 adds the `late` flag on spans. While the dashboard runs, it
+automatically (schema v4 adds the `late` flag on spans, v5 the `tool_call_id`). While the dashboard runs, it
 reconciles every 5 minutes: a run with no heartbeat for more than 15 minutes
 **and** no live, start-time-verified process is sealed as `receipt_missing`.
 A hook session that sits idle that long is sealed this way too, and its next
@@ -235,12 +288,21 @@ call continues in a linked run.
 warden is a **solo-operator** tool today. The supervisor and the supervised
 agent run as the **same OS user**, which sets hard limits:
 
-- **The agent can read `~/.warden`**, including the signing key. A determined
-  malicious agent could forge new receipts. Mitigations: run the agent as a
-  separate UID or in a container, with `WARDEN_DIR` owned by the operator.
-  Ship exports to a SIEM and keep the public key elsewhere: anything already
-  exported stays verifiable against that key. `verify` detects tampering after
-  the fact; it does not prevent it.
+- **The signing key is only policy-protected.** warden denies the tool calls
+  it can see that touch `~/.warden` (see "warden protects itself"). Under the
+  same OS user, though, anything the policy misses can still read
+  `receipt.key`: a script on disk, an allowlisted interpreter, or a variable
+  expanded at runtime. Whoever holds the key can re-sign the whole chain. **The
+  real fix is outside warden's reach today**, so do one of these:
+  - run the agent as a **separate OS user** (or in a container) with
+    `WARDEN_DIR` owned by the operator and mode 0700;
+  - or anchor the chain externally: ship each export, whose signed header
+    carries the chain head, to a SIEM or write-once store the agent can't
+    reach, and keep `receipt.pub` there. Anything exported before a
+    compromise stays verifiable.
+
+  `verify` detects tampering after the fact; it does not prevent it.
+  OS-keychain storage and external notarization are on the 1.0 list.
 - **The socket is untrusted input.** A supervised process can emit arbitrary
   spans for its own run. They are redacted and policy-gated, and the wire can
   never set `pre_decided`, but warden cannot tell a lying hook from an honest
@@ -272,8 +334,8 @@ agent run as the **same OS user**, which sets hard limits:
   rotation ceremony yet.
 - `verify --bundle` holds the bundle's spans in memory. Split very large
   archives into several exports.
-- The Codex hook protocol is taken from a third-party guide; test it against
-  your Codex version before relying on it.
+- Codex hook failures and timeouts are fail-open by Codex's design (see the
+  hooks section).
 
 ## Path to 1.0
 
@@ -285,7 +347,7 @@ agent run as the **same OS user**, which sets hard limits:
 | OTLP mapping | Tracks GenAI semconv (Development upstream) | Follows upstream; will change when upstream does |
 | Store schema | Forward migrations only | Same, plus Postgres |
 | Distribution | `scripts/build-npm.sh` builds npm packages per OS/CPU (not yet published) | Signed release binaries + checksums |
-| Open items | | Key rotation, two-person approvals, Windows, signed kill audit |
+| Open items | | Key rotation, OS-keychain/separate-user key storage, external chain anchoring, two-person approvals, Windows, signed kill audit |
 
 ## Building the npm package
 

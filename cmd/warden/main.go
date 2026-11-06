@@ -76,6 +76,8 @@ func openApp(dir, policyPath string) (*app, error) {
 		st.Close()
 		return nil, err
 	}
+	// Agents must never touch their supervisor's own state.
+	pol.Protect(dir, policyPath)
 	signer, err := receipt.LoadOrCreate(dir)
 	if err != nil {
 		st.Close()
@@ -143,9 +145,16 @@ func main() {
 	case "verify":
 		// Bundle verification is for auditors: it must not need (or create)
 		// a warden data dir.
-		if b, pk, ok := bundleFlags(rest); ok {
-			os.Exit(cmdVerifyBundle(b, pk))
+		if b, pk, au, ok := bundleFlags(rest); ok {
+			os.Exit(cmdVerifyBundle(b, pk, au))
 		}
+	}
+
+	if cmd == "hook" {
+		// Hooks must fail CLOSED: harnesses treat a non-blocking error
+		// (exit 1, no JSON) as "go ahead". Every startup error and panic
+		// becomes a deny in the harness's protocol.
+		os.Exit(runHookFailClosed(dir, policyPath, rest))
 	}
 
 	a, err := openApp(dir, policyPath)
@@ -181,8 +190,6 @@ func main() {
 		code = a.cmdExport(rest)
 	case "scan":
 		code = a.cmdScan(rest)
-	case "hook":
-		code = a.cmdHook(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", cmd)
 		usage()
@@ -219,16 +226,17 @@ Global flags: --dir DIR (default ~/.warden, or $WARDEN_DIR), --policy FILE
 }
 
 // bundleFlags extracts --bundle/--pubkey for store-less verification.
-func bundleFlags(args []string) (bundle, pubkey string, ok bool) {
+func bundleFlags(args []string) (bundle, pubkey string, allowUnsigned, ok bool) {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	b := fs.String("bundle", "", "")
 	p := fs.String("pubkey", "", "")
+	au := fs.Bool("allow-unsigned", false, "")
 	_ = fs.String("run", "", "")
 	if err := fs.Parse(args); err != nil || *b == "" {
-		return "", "", false
+		return "", "", false, false
 	}
-	return *b, *p, true
+	return *b, *p, *au, true
 }
 
 func newFlagSet(name string) *flag.FlagSet {

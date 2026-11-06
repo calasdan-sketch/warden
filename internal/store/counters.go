@@ -18,6 +18,9 @@ const schemaV3 = `ALTER TABLE receipts ADD COLUMN status TEXT NOT NULL DEFAULT '
 // the audit trail but are not covered by the receipt's signed trace digest.
 const schemaV4 = `ALTER TABLE spans ADD COLUMN late INTEGER NOT NULL DEFAULT 0;`
 
+// schemaV5 stores the harness tool-use id (exported as gen_ai.tool.call.id).
+const schemaV5 = `ALTER TABLE spans ADD COLUMN tool_call_id TEXT NOT NULL DEFAULT '';`
+
 // TouchHeartbeat marks a run alive.
 func (s *Store) TouchHeartbeat(runID string) error {
 	_, err := s.db.Exec(`UPDATE runs SET last_heartbeat=? WHERE run_id=?`, ts(time.Now().UTC()), runID)

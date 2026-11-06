@@ -68,7 +68,7 @@ func (s *Store) migrate() error {
 	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_version`).Scan(&v); err != nil {
 		return err
 	}
-	migrations := []string{schemaV1, schemaV2, schemaV3, schemaV4}
+	migrations := []string{schemaV1, schemaV2, schemaV3, schemaV4, schemaV5}
 	for i, m := range migrations {
 		if i+1 <= v {
 			continue

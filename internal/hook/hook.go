@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"path"
 	"strings"
 	"unicode/utf8"
 
@@ -76,6 +77,21 @@ var writeTools = map[string]bool{"write": true, "edit": true, "multiedit": true,
 
 // ToSpan maps a PreToolUse payload to the warden span that policy judges.
 func ToSpan(in *Input) *model.Span {
+	sp := toSpan(in)
+	id := in.ToolUseID
+	if len(id) > 128 {
+		id = id[:128]
+	}
+	sp.ToolCallID = id
+	// Relative paths are judged where the harness will resolve them.
+	if sp.Path != "" && in.Cwd != "" && !path.IsAbs(sp.Path) && !strings.HasPrefix(sp.Path, "~") &&
+		!strings.HasPrefix(sp.Path, "$") && !strings.Contains(sp.Path, `\`) {
+		sp.Path = path.Join(in.Cwd, sp.Path)
+	}
+	return sp
+}
+
+func toSpan(in *Input) *model.Span {
 	var ti map[string]any
 	_ = json.Unmarshal(in.ToolInput, &ti) // non-object input: treated as opaque args
 	name := in.ToolName
@@ -96,6 +112,16 @@ func ToSpan(in *Input) *model.Span {
 		sp.ToolServer = parts[0]
 		sp.ArgsSummary = compact(in.ToolInput)
 		return sp
+	}
+	if lname == "apply_patch" {
+		// Codex apply_patch carries the patch text in tool_input.command.
+		patch, _ := ti["command"].(string)
+		if patch == "" {
+			patch, _ = ti["input"].(string)
+		}
+		if p := patchTarget(patch); p != "" {
+			return &model.Span{Kind: model.SpanFileOp, Name: name, Path: p, Op: "write"}
+		}
 	}
 	switch lname {
 	case "read", "write", "edit", "multiedit", "notebookedit", "notebookread", "glob", "grep", "ls":
@@ -260,4 +286,43 @@ func Summarize(s string) string {
 		cut = cut[:len(cut)-1]
 	}
 	return fmt.Sprintf("%s…[+%d bytes]", cut, len(s)-len(cut))
+}
+
+// PatchPaths lists the files an apply_patch envelope touches
+// ("*** Add File: p", "*** Update File: p", "*** Delete File: p",
+// "*** Move to: p").
+func PatchPaths(patch string) []string {
+	var out []string
+	for _, line := range strings.Split(patch, "\n") {
+		line = strings.TrimSpace(line)
+		for _, pre := range []string{"*** Add File:", "*** Update File:", "*** Delete File:", "*** Move to:"} {
+			if strings.HasPrefix(line, pre) {
+				if p := strings.TrimSpace(strings.TrimPrefix(line, pre)); p != "" {
+					out = append(out, p)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func patchTarget(patch string) string {
+	if paths := PatchPaths(patch); len(paths) > 0 {
+		return paths[0]
+	}
+	return ""
+}
+
+// PatchInput returns the patch text of an apply_patch call ("" otherwise).
+func PatchInput(in *Input) string {
+	if strings.ToLower(in.ToolName) != "apply_patch" {
+		return ""
+	}
+	var ti map[string]any
+	_ = json.Unmarshal(in.ToolInput, &ti)
+	if s, ok := ti["command"].(string); ok {
+		return s
+	}
+	s, _ := ti["input"].(string)
+	return s
 }

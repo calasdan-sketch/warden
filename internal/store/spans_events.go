@@ -31,8 +31,8 @@ func (s *Store) InsertSpan(sp *model.Span) error {
 		tool,tool_server,args_summary,arg_hash,exit_status,output_bytes,
 		path,op,count,bytes,host,port,net_bytes,child_run_id,spawn_reason,
 		gate,decision,approver,decision_latency_ms,
-		policy_decision,policy_reason,policy_version,redacted,late)
-		SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+		policy_decision,policy_reason,policy_version,redacted,tool_call_id,late)
+		SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		  CASE WHEN EXISTS(SELECT 1 FROM runs WHERE run_id=? AND status NOT IN ('running','awaiting_approval'))
 		       THEN 1 ELSE 0 END
 		RETURNING late`,
@@ -41,7 +41,7 @@ func (s *Store) InsertSpan(sp *model.Span) error {
 		sp.Tool, sp.ToolServer, sp.ArgsSummary, sp.ArgHash, sp.ExitStatus, sp.OutputBytes,
 		sp.Path, sp.Op, sp.Count, sp.Bytes, sp.Host, sp.Port, sp.NetBytes, sp.ChildRunID, sp.SpawnReason,
 		sp.Gate, sp.Decision, sp.Approver, sp.DecisionLatencyMs,
-		sp.PolicyDecision, sp.PolicyReason, sp.PolicyVersion, boolInt(sp.Redacted),
+		sp.PolicyDecision, sp.PolicyReason, sp.PolicyVersion, boolInt(sp.Redacted), sp.ToolCallID,
 		sp.RunID).Scan(&late)
 	if err != nil {
 		return err
@@ -57,7 +57,7 @@ func (s *Store) SpansForRun(runID string) ([]*model.Span, error) {
 		tool,tool_server,args_summary,arg_hash,exit_status,output_bytes,
 		path,op,count,bytes,host,port,net_bytes,child_run_id,spawn_reason,
 		gate,decision,approver,decision_latency_ms,
-		policy_decision,policy_reason,policy_version,redacted,late
+		policy_decision,policy_reason,policy_version,redacted,late,tool_call_id
 		FROM spans WHERE run_id=? ORDER BY started_at ASC, rowid ASC`, runID)
 	if err != nil {
 		return nil, err
@@ -84,7 +84,7 @@ func scanSpan(row rowScanner) (*model.Span, error) {
 		&sp.Tool, &sp.ToolServer, &sp.ArgsSummary, &sp.ArgHash, &sp.ExitStatus, &sp.OutputBytes,
 		&sp.Path, &sp.Op, &sp.Count, &sp.Bytes, &sp.Host, &sp.Port, &sp.NetBytes, &sp.ChildRunID, &sp.SpawnReason,
 		&sp.Gate, &sp.Decision, &sp.Approver, &sp.DecisionLatencyMs,
-		&sp.PolicyDecision, &sp.PolicyReason, &sp.PolicyVersion, &redacted, &late)
+		&sp.PolicyDecision, &sp.PolicyReason, &sp.PolicyVersion, &redacted, &late, &sp.ToolCallID)
 	if err != nil {
 		return nil, err
 	}

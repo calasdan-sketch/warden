@@ -56,6 +56,9 @@ type canonicalSpanV1 struct {
 	PolicyReason      string  `json:"policy_reason"`
 	PolicyVersion     string  `json:"policy_version"`
 	Redacted          bool    `json:"redacted"`
+	// Added after v1 was drafted; omitempty keeps hashes of spans without
+	// a tool-call id byte-identical.
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 func tsCanon(t time.Time) string {
@@ -80,7 +83,7 @@ func SpanHash(sp *model.Span) string {
 		ChildRunID: sp.ChildRunID, SpawnReason: sp.SpawnReason,
 		Gate: sp.Gate, Decision: sp.Decision, Approver: sp.Approver, DecisionLatencyMs: sp.DecisionLatencyMs,
 		PolicyDecision: sp.PolicyDecision, PolicyReason: sp.PolicyReason, PolicyVersion: sp.PolicyVersion,
-		Redacted: sp.Redacted,
+		Redacted: sp.Redacted, ToolCallID: sp.ToolCallID,
 	}
 	if sp.EndedAt != nil {
 		c.EndedAt = tsCanon(*sp.EndedAt)

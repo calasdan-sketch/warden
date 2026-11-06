@@ -25,6 +25,9 @@ type Item struct {
 	Receipt *model.Receipt
 	Body    string
 	Spans   []*model.Span
+	// FullHeader marks receipts whose every header field was read from an
+	// export: they must all equal the signed body.
+	FullHeader bool
 }
 
 // Report is the outcome of a verification pass.
@@ -36,6 +39,9 @@ type Report struct {
 	LateSpans   int      // spans recorded after their seal (kept, not covered)
 	ChainOK     bool     // hash chain intact (genesis → head, no forks/gaps)
 	Problems    []string // human-readable failures
+	// Unsigned lists records present but NOT covered by any signature:
+	// late spans, spans of runs without a receipt, run/kill-audit rows.
+	Unsigned []string
 }
 
 // OK reports whether everything verified.
@@ -49,6 +55,21 @@ func Verify(items []Item, pub ed25519.PublicKey) *Report {
 		if err := receipt.Verify(it.Receipt, it.Body, pub); err != nil {
 			rep.Problems = append(rep.Problems, fmt.Sprintf("%s: %v", it.Receipt.RunID, err))
 			continue
+		}
+		if it.FullHeader {
+			if err := receipt.MatchesBody(it.Receipt, it.Body); err != nil {
+				rep.Problems = append(rep.Problems, fmt.Sprintf("%s: %v", it.Receipt.RunID, err))
+				continue
+			}
+			if it.Receipt.KeyID != "" && it.Receipt.KeyID != receipt.KeyIDOf(pub) {
+				rep.Problems = append(rep.Problems, fmt.Sprintf("%s: key_id %s is not the supplied key", it.Receipt.RunID, it.Receipt.KeyID))
+				continue
+			}
+		}
+		for _, sp := range it.Spans {
+			if sp.LateAfterSeal {
+				rep.Unsigned = append(rep.Unsigned, fmt.Sprintf("span %s of run %s (%s %s) arrived after the seal", sp.SpanID, sp.RunID, sp.Kind, sp.Tool))
+			}
 		}
 		recs = append(recs, it.Receipt)
 		late, covered, err := receipt.VerifyTrace(it.Body, it.Spans)
@@ -167,9 +188,38 @@ const BundleFormat = "warden-audit-jsonl-v1"
 // MaxBundleLine bounds one JSONL record (a receipt or span is a few KiB).
 const MaxBundleLine = 8 << 20
 
+// Bundle is a parsed JSONL export.
+type Bundle struct {
+	Header *BundleHeader
+	Items  []Item
+	// Orphans are spans whose run has no receipt in the bundle (live runs at
+	// export time, or a receipt that was removed): never signed.
+	Orphans []*model.Span
+	// RunRecords and KillRecords count the run and kill_audit rows: they are
+	// convenience copies, not signed (receipts and spans are the evidence).
+	RunRecords, KillRecords int
+}
+
+// UnsignedRecords describes everything in the bundle no signature covers
+// (beyond the late spans Verify lists per receipt).
+func (b *Bundle) UnsignedRecords() []string {
+	var out []string
+	for _, sp := range b.Orphans {
+		out = append(out, fmt.Sprintf("span %s of run %s (%s %s) has no receipt in this bundle", sp.SpanID, sp.RunID, sp.Kind, sp.Tool))
+	}
+	if b.RunRecords > 0 {
+		out = append(out, fmt.Sprintf("%d run record(s): summaries only; their signed figures are in the receipts", b.RunRecords))
+	}
+	if b.KillRecords > 0 {
+		out = append(out, fmt.Sprintf("%d kill_audit record(s): not signed in this version", b.KillRecords))
+	}
+	return out
+}
+
 // ReadBundle parses a JSONL export into verification items. Spans and
 // receipts are matched by run_id regardless of their order in the file.
-func ReadBundle(r io.Reader) ([]Item, *BundleHeader, error) {
+// Unknown record types are an error, never silently skipped.
+func ReadBundle(r io.Reader) (*Bundle, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), MaxBundleLine)
 	type rec struct {
@@ -179,12 +229,13 @@ func ReadBundle(r io.Reader) ([]Item, *BundleHeader, error) {
 	var order []string
 	recs := map[string]rec{}
 	spans := map[string][]*model.Span{}
-	var hdr *BundleHeader
+	var spanOrder []string
+	b := &Bundle{}
 	line := 0
 	for sc.Scan() {
 		line++
-		b := sc.Bytes()
-		if len(strings.TrimSpace(string(b))) == 0 {
+		raw := sc.Bytes()
+		if len(strings.TrimSpace(string(raw))) == 0 {
 			continue
 		}
 		var env struct {
@@ -193,42 +244,71 @@ func ReadBundle(r io.Reader) ([]Item, *BundleHeader, error) {
 			Receipt *model.Receipt  `json:"receipt"`
 			Body    json.RawMessage `json:"body"`
 		}
-		if err := json.Unmarshal(b, &env); err != nil {
-			return nil, nil, fmt.Errorf("line %d: %w", line, err)
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return nil, fmt.Errorf("line %d: %w", line, err)
 		}
 		switch env.Type {
 		case "header":
+			if b.Header != nil {
+				return nil, fmt.Errorf("line %d: second header", line)
+			}
 			var h BundleHeader
-			if err := json.Unmarshal(b, &h); err != nil {
-				return nil, nil, fmt.Errorf("line %d: %w", line, err)
+			if err := json.Unmarshal(raw, &h); err != nil {
+				return nil, fmt.Errorf("line %d: %w", line, err)
 			}
-			hdr = &h
+			b.Header = &h
 		case "span":
-			if env.Span != nil {
-				spans[env.Span.RunID] = append(spans[env.Span.RunID], env.Span)
+			if env.Span == nil {
+				return nil, fmt.Errorf("line %d: span record without span", line)
 			}
+			if _, seen := spans[env.Span.RunID]; !seen {
+				spanOrder = append(spanOrder, env.Span.RunID)
+			}
+			spans[env.Span.RunID] = append(spans[env.Span.RunID], env.Span)
 		case "receipt":
 			if env.Receipt == nil || len(env.Body) == 0 {
-				return nil, nil, fmt.Errorf("line %d: receipt record without body", line)
+				return nil, fmt.Errorf("line %d: receipt record without body", line)
 			}
 			if _, dup := recs[env.Receipt.RunID]; dup {
-				return nil, nil, fmt.Errorf("line %d: duplicate receipt for run %s", line, env.Receipt.RunID)
+				return nil, fmt.Errorf("line %d: duplicate receipt for run %s", line, env.Receipt.RunID)
 			}
 			// The body is embedded as raw JSON: its exact bytes are what the
 			// signature covers, so it must not be re-encoded.
 			recs[env.Receipt.RunID] = rec{env.Receipt, string(env.Body)}
 			order = append(order, env.Receipt.RunID)
+		case "run":
+			b.RunRecords++
+		case "kill_audit":
+			b.KillRecords++
+		default:
+			return nil, fmt.Errorf("line %d: unknown record type %q", line, env.Type)
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return nil, nil, fmt.Errorf("line %d: %w", line+1, err)
+		return nil, fmt.Errorf("line %d: %w", line+1, err)
 	}
-	items := make([]Item, 0, len(order))
+	b.Items = make([]Item, 0, len(order))
 	for _, id := range order {
 		r := recs[id]
-		items = append(items, Item{Receipt: r.rec, Body: r.body, Spans: spans[id]})
+		b.Items = append(b.Items, Item{Receipt: r.rec, Body: r.body, Spans: spans[id], FullHeader: true})
 	}
-	return items, hdr, nil
+	for _, id := range spanOrder {
+		if _, ok := recs[id]; !ok {
+			b.Orphans = append(b.Orphans, spans[id]...)
+		}
+	}
+	return b, nil
+}
+
+// VerifyBundle runs Verify and the signed-header check on a parsed bundle
+// and adds every unsigned record to the report.
+func VerifyBundle(b *Bundle, pub ed25519.PublicKey) *Report {
+	rep := Verify(b.Items, pub)
+	if err := CheckHeader(b.Header, b.Items, pub); err != nil {
+		rep.Problems = append(rep.Problems, "header: "+err.Error())
+	}
+	rep.Unsigned = append(rep.Unsigned, b.UnsignedRecords()...)
+	return rep
 }
 
 // LoadPublicKey reads an Ed25519 public key: raw 32 bytes (warden's

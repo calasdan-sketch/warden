@@ -13,6 +13,7 @@ import (
 
 	"github.com/calasdan-sketch/warden/internal/audit"
 	"github.com/calasdan-sketch/warden/internal/otel"
+	"github.com/calasdan-sketch/warden/internal/receipt"
 	"github.com/calasdan-sketch/warden/internal/store"
 )
 
@@ -115,6 +116,9 @@ func (a *app) cmdExport(args []string) int {
 				_ = enc.Encode(map[string]any{"type": "span", "span": sp})
 			}
 			if rec, body, err := a.st.GetReceipt(run.RunID); err == nil {
+				// Header fields come from the signed body, so the export's
+				// readable header can be checked field by field.
+				_ = receipt.FillFromBody(rec, body)
 				_ = enc.Encode(map[string]any{"type": "receipt", "receipt": rec, "body": json.RawMessage(body)})
 			}
 		}

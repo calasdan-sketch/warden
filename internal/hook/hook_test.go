@@ -114,3 +114,25 @@ func TestSummarizeBoundsStorage(t *testing.T) {
 		t.Fatal("short args must be untouched")
 	}
 }
+
+func TestToSpanCarriesToolUseIDAndResolvesCwd(t *testing.T) {
+	i := in("Read", `{"file_path":"src/x.go"}`)
+	i.ToolUseID, i.Cwd = "toolu_01ABC", "/home/u/proj"
+	sp := ToSpan(i)
+	if sp.ToolCallID != "toolu_01ABC" || sp.Path != "/home/u/proj/src/x.go" {
+		t.Fatalf("got %+v", sp)
+	}
+}
+
+func TestApplyPatchMapsToFileWrites(t *testing.T) {
+	patch := "*** Begin Patch\n*** Update File: src/a.go\n@@\n-x\n+y\n*** Add File: .codex/hooks.json\n+{}\n*** End Patch"
+	b, _ := json.Marshal(map[string]string{"command": patch})
+	i := in("apply_patch", string(b))
+	sp := ToSpan(i)
+	if sp.Kind != model.SpanFileOp || sp.Op != "write" || sp.Path != "src/a.go" {
+		t.Fatalf("got %+v", sp)
+	}
+	if got := PatchPaths(PatchInput(i)); len(got) != 2 || got[1] != ".codex/hooks.json" {
+		t.Fatalf("paths: %v", got)
+	}
+}

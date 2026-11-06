@@ -77,7 +77,7 @@ func TestGenAISemconvMapping(t *testing.T) {
 	sps := []*model.Span{
 		{SpanID: "aaaa0000bbbb1111cccc2222dddd3333", RunID: runID, Kind: model.SpanLLMCall, Model: "claude-sonnet-4-5",
 			TokensIn: 1200, TokensOut: 400, TokensCached: 800, CostUSD: 0.012, StartedAt: ts},
-		{SpanID: "unattached-ish-id", RunID: runID, Kind: model.SpanToolCall, Tool: "Bash",
+		{SpanID: "unattached-ish-id", RunID: runID, Kind: model.SpanToolCall, Tool: "Bash", ToolCallID: "toolu_01ABC",
 			ArgsSummary: "rm -rf /", Status: "denied", PolicyDecision: "deny", PolicyReason: "deny pattern", StartedAt: ts},
 	}
 	out := ToOTLPRuns([]RunTrace{{Run: run, Spans: sps}})
@@ -112,6 +112,9 @@ func TestGenAISemconvMapping(t *testing.T) {
 	ta := attrMap(tool)
 	if tool["name"] != "execute_tool Bash" || ta["gen_ai.tool.name"]["stringValue"] != "Bash" || ta["error.type"]["stringValue"] != "policy_denied" {
 		t.Errorf("tool span: %v %v", tool["name"], ta)
+	}
+	if ta["gen_ai.tool.call.id"]["stringValue"] != "toolu_01ABC" {
+		t.Errorf("tool_use_id must export as gen_ai.tool.call.id: %v", ta)
 	}
 	if !isHex(tool["spanId"].(string), 16) {
 		t.Errorf("non-hex warden span id must be hashed to a valid span id: %v", tool["spanId"])

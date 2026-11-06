@@ -279,6 +279,9 @@ func otlpSpan(sp *model.Span, traceID, parent string, run *model.Run) map[string
 			strAttr("warden.tool.args_summary", sp.ArgsSummary),
 			intAttr("warden.tool.exit_status", int64(sp.ExitStatus)),
 		)
+		if sp.ToolCallID != "" {
+			attrs = append(attrs, strAttr("gen_ai.tool.call.id", sp.ToolCallID))
+		}
 		name = strings.TrimSpace("execute_tool " + sp.Tool)
 	case model.SpanFileOp:
 		attrs = append(attrs,

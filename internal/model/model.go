@@ -60,6 +60,7 @@ type Span struct {
 	Tool        string `json:"tool,omitempty"`
 	ToolServer  string `json:"tool_server,omitempty"`  // MCP server name; joins to mcp-audit findings
 	ArgsSummary string `json:"args_summary,omitempty"` // first N chars, secrets redacted
+	ToolCallID  string `json:"tool_call_id,omitempty"` // harness tool-use id (gen_ai.tool.call.id)
 	ArgHash     string `json:"arg_hash,omitempty"`     // hash of full args (redacted form)
 	ExitStatus  int    `json:"exit_status,omitempty"`
 	OutputBytes int64  `json:"output_bytes,omitempty"`

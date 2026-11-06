@@ -5,7 +5,7 @@
 // No postinstall script and no network access at install or run time.
 "use strict";
 
-const { spawnSync } = require("child_process");
+const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
@@ -51,10 +51,30 @@ function fail(msg) {
 }
 
 const bin = findBinary();
-const res = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" });
-if (res.error) fail(`warden: could not run ${bin}: ${res.error.message}`);
-if (res.signal) {
-  // Re-raise the child's fatal signal so callers see the same exit status.
-  process.kill(process.pid, res.signal);
+const child = spawn(bin, process.argv.slice(2), { stdio: "inherit" });
+
+// Forward termination signals so `kill <launcher pid>` (or Ctrl-C from a
+// supervisor) reaches warden, which then seals its receipt before exiting.
+const FORWARD = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"];
+const handlers = {};
+for (const sig of FORWARD) {
+  handlers[sig] = () => {
+    try {
+      child.kill(sig);
+    } catch (_) {
+      /* child already gone */
+    }
+  };
+  process.on(sig, handlers[sig]);
 }
-process.exit(res.status === null ? 1 : res.status);
+
+child.on("error", (err) => fail(`warden: could not run ${bin}: ${err.message}`));
+child.on("exit", (code, signal) => {
+  for (const sig of FORWARD) process.removeListener(sig, handlers[sig]);
+  if (signal) {
+    // Re-raise the child's fatal signal so callers see the same exit status.
+    process.kill(process.pid, signal);
+    return;
+  }
+  process.exit(code === null ? 1 : code);
+});

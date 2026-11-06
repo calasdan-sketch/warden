@@ -131,30 +131,136 @@ func credentialAdjacent(path string) bool {
 	// Windows-style paths (from harnesses on Windows/WSL) use backslashes;
 	// judge them by the same rules.
 	path = strings.ReplaceAll(path, `\`, "/")
-	base := strings.ToLower(filepath.Base(path))
-	patterns := []string{
-		"*.pem", "*.key", "*.p12", "*.pfx", "*.jks", "*.keystore",
-		".env*", "*.env", "id_rsa*", "id_ed25519*", "id_ecdsa*",
-		"*credentials*", ".npmrc", ".pypirc",
-		"kubeconfig", "config.json", ".netrc", "_netrc",
-	}
-	for _, p := range patterns {
-		if ok, _ := filepath.Match(p, base); ok {
-			return true
-		}
-	}
-	if strings.Contains(base, "secret") &&
-		(strings.Contains(base, ".") || base == "secret" || base == "secrets") {
-		return true
-	}
-	// dotfiles in home-ish credential dirs
-	lower := strings.ToLower(path)
-	for _, d := range []string{".aws/", ".ssh/", ".gnupg/", ".docker/", ".kube/", "gcloud/"} {
-		if strings.Contains(lower, d) {
+	for _, p := range ExpandBraces(path, 32) {
+		if credentialAdjacentOne(p) {
 			return true
 		}
 	}
 	return false
+}
+
+// credentialBasePatterns are file-name patterns that hold secrets.
+var credentialBasePatterns = []string{
+	"*.pem", "*.key", "*.p12", "*.pfx", "*.jks", "*.keystore",
+	".env*", "*.env", "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*",
+	"*credentials*", ".npmrc", ".pypirc", ".netrc", "_netrc",
+	"kubeconfig", "config.json", ".git-credentials",
+}
+
+// CredentialDirs are directory names whose whole subtree is
+// credential-adjacent. Matched as a path component, with or without a
+// trailing slash (".ssh", "~/.ssh", "/root/.ssh/x").
+var CredentialDirs = []string{".ssh", ".aws", ".gnupg", ".docker", ".kube", "gcloud", ".warden", ".azure"}
+
+func credentialAdjacentOne(path string) bool {
+	base := strings.ToLower(filepath.Base(path))
+	for _, p := range credentialBasePatterns {
+		if globMatch(p, base) {
+			return true
+		}
+	}
+	if !hasGlob(base) && strings.Contains(base, "secret") &&
+		(strings.Contains(base, ".") || base == "secret" || base == "secrets") {
+		return true
+	}
+	for _, comp := range strings.Split(strings.ToLower(path), "/") {
+		if comp == "" {
+			continue
+		}
+		for _, d := range CredentialDirs {
+			if comp == d || (hasGlob(comp) && matchQuiet(comp, d)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// globMatch matches a credential pattern against a base name; when the
+// base name itself is a shell glob (cat ~/.ssh/id_rs?), it also checks
+// whether the glob could expand to a name the pattern covers, using
+// representative names.
+func globMatch(pattern, base string) bool {
+	if matchQuiet(pattern, base) {
+		return true
+	}
+	if !hasGlob(base) {
+		return false
+	}
+	for _, rep := range credentialRepresentatives {
+		if matchQuiet(pattern, rep) && matchQuiet(base, rep) {
+			return true
+		}
+	}
+	return false
+}
+
+// credentialRepresentatives are concrete names a glob is tested against.
+var credentialRepresentatives = []string{
+	"cert.pem", "server.key", "receipt.key", "store.p12", "store.pfx", "store.jks", "app.keystore",
+	".env", ".env.local", "prod.env", "id_rsa", "id_rsa.pub", "id_ed25519", "id_ecdsa", "id_dsa",
+	"credentials", "credentials.json", "application_default_credentials.json",
+	".npmrc", ".pypirc", ".netrc", "_netrc", "kubeconfig", "config.json", ".git-credentials",
+}
+
+func hasGlob(s string) bool { return strings.ContainsAny(s, "*?[") }
+
+func matchQuiet(pattern, name string) bool {
+	ok, err := filepath.Match(pattern, name)
+	return err == nil && ok
+}
+
+// ExpandBraces performs shell brace expansion ("~/.{ssh,aws}/x") so path
+// checks see every name the shell would. It is bounded: past max results
+// the unexpanded remainder is returned as-is (still checked by globs).
+func ExpandBraces(s string, max int) []string {
+	out := []string{s}
+	for i := 0; i < 8; i++ { // nesting / repeat bound
+		var next []string
+		changed := false
+		for _, x := range out {
+			open := strings.IndexByte(x, '{')
+			if open < 0 {
+				next = append(next, x)
+				continue
+			}
+			depth, close := 0, -1
+			var commas []int
+			for j := open; j < len(x); j++ {
+				switch x[j] {
+				case '{':
+					depth++
+				case '}':
+					depth--
+				case ',':
+					if depth == 1 {
+						commas = append(commas, j)
+					}
+				}
+				if depth == 0 {
+					close = j
+					break
+				}
+			}
+			if close < 0 || len(commas) == 0 {
+				next = append(next, x)
+				continue
+			}
+			changed = true
+			bounds := append(append([]int{open}, commas...), close)
+			for k := 0; k+1 < len(bounds); k++ {
+				next = append(next, x[:open]+x[bounds[k]+1:bounds[k+1]]+x[close+1:])
+			}
+		}
+		out = next
+		if !changed || len(out) > max {
+			break
+		}
+	}
+	if len(out) > max {
+		out = out[:max]
+	}
+	return out
 }
 
 // IsCredentialAdjacentPath reports whether path looks like it holds secrets.
