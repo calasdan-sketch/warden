@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/model"
 )
 
 // StoreReceipt persists a sealed receipt (body is the canonical JSON).
@@ -96,6 +96,13 @@ func (s *Store) LatestReceiptHash() (string, error) {
 		return "", err
 	}
 	return h.String, nil
+}
+
+// CountReceipts returns how many receipts are sealed.
+func (s *Store) CountReceipts() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM receipts`).Scan(&n)
+	return n, err
 }
 
 // SealedReceipt is one receipt with its canonical body.

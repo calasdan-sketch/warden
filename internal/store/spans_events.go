@@ -3,7 +3,7 @@ package store
 import (
 	"database/sql"
 
-	"warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/model"
 )
 
 func boolInt(b bool) int {
@@ -14,25 +14,40 @@ func boolInt(b bool) int {
 }
 
 // InsertSpan records one span. The caller must have redacted it first.
+//
+// The late-after-seal flag is decided inside the same statement as the
+// insert (atomic in SQLite): a span is "late" when its run has already left
+// the live states, i.e. a sealer has claimed it. Because ClaimForSeal runs
+// before the sealer reads the spans to digest, every span is either covered
+// by the receipt's trace digest or explicitly marked late — never neither.
 func (s *Store) InsertSpan(sp *model.Span) error {
 	var ended any
 	if sp.EndedAt != nil {
 		ended = ts(*sp.EndedAt)
 	}
-	_, err := s.db.Exec(`INSERT INTO spans(span_id,run_id,kind,name,agent_id,fleet_id,started_at,ended_at,status,
+	var late int
+	err := s.db.QueryRow(`INSERT INTO spans(span_id,run_id,kind,name,agent_id,fleet_id,started_at,ended_at,status,
 		model,tokens_in,tokens_out,tokens_cached,cost_usd,cache_hit,
 		tool,tool_server,args_summary,arg_hash,exit_status,output_bytes,
 		path,op,count,bytes,host,port,net_bytes,child_run_id,spawn_reason,
 		gate,decision,approver,decision_latency_ms,
-		policy_decision,policy_reason,policy_version,redacted)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		policy_decision,policy_reason,policy_version,redacted,late)
+		SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+		  CASE WHEN EXISTS(SELECT 1 FROM runs WHERE run_id=? AND status NOT IN ('running','awaiting_approval'))
+		       THEN 1 ELSE 0 END
+		RETURNING late`,
 		sp.SpanID, sp.RunID, string(sp.Kind), sp.Name, sp.AgentID, sp.FleetID, ts(sp.StartedAt), ended, sp.Status,
 		sp.Model, sp.TokensIn, sp.TokensOut, sp.TokensCached, sp.CostUSD, boolInt(sp.CacheHit),
 		sp.Tool, sp.ToolServer, sp.ArgsSummary, sp.ArgHash, sp.ExitStatus, sp.OutputBytes,
 		sp.Path, sp.Op, sp.Count, sp.Bytes, sp.Host, sp.Port, sp.NetBytes, sp.ChildRunID, sp.SpawnReason,
 		sp.Gate, sp.Decision, sp.Approver, sp.DecisionLatencyMs,
-		sp.PolicyDecision, sp.PolicyReason, sp.PolicyVersion, boolInt(sp.Redacted))
-	return err
+		sp.PolicyDecision, sp.PolicyReason, sp.PolicyVersion, boolInt(sp.Redacted),
+		sp.RunID).Scan(&late)
+	if err != nil {
+		return err
+	}
+	sp.LateAfterSeal = late == 1
+	return nil
 }
 
 // SpansForRun returns a run's spans oldest-first (the trace waterfall order).
@@ -42,7 +57,7 @@ func (s *Store) SpansForRun(runID string) ([]*model.Span, error) {
 		tool,tool_server,args_summary,arg_hash,exit_status,output_bytes,
 		path,op,count,bytes,host,port,net_bytes,child_run_id,spawn_reason,
 		gate,decision,approver,decision_latency_ms,
-		policy_decision,policy_reason,policy_version,redacted
+		policy_decision,policy_reason,policy_version,redacted,late
 		FROM spans WHERE run_id=? ORDER BY started_at ASC, rowid ASC`, runID)
 	if err != nil {
 		return nil, err
@@ -63,13 +78,13 @@ func scanSpan(row rowScanner) (*model.Span, error) {
 	var sp model.Span
 	var started, ended sql.NullString
 	var kind string
-	var cacheHit, redacted int
+	var cacheHit, redacted, late int
 	err := row.Scan(&sp.SpanID, &sp.RunID, &kind, &sp.Name, &sp.AgentID, &sp.FleetID, &started, &ended, &sp.Status,
 		&sp.Model, &sp.TokensIn, &sp.TokensOut, &sp.TokensCached, &sp.CostUSD, &cacheHit,
 		&sp.Tool, &sp.ToolServer, &sp.ArgsSummary, &sp.ArgHash, &sp.ExitStatus, &sp.OutputBytes,
 		&sp.Path, &sp.Op, &sp.Count, &sp.Bytes, &sp.Host, &sp.Port, &sp.NetBytes, &sp.ChildRunID, &sp.SpawnReason,
 		&sp.Gate, &sp.Decision, &sp.Approver, &sp.DecisionLatencyMs,
-		&sp.PolicyDecision, &sp.PolicyReason, &sp.PolicyVersion, &redacted)
+		&sp.PolicyDecision, &sp.PolicyReason, &sp.PolicyVersion, &redacted, &late)
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +102,7 @@ func scanSpan(row rowScanner) (*model.Span, error) {
 	}
 	sp.CacheHit = cacheHit == 1
 	sp.Redacted = redacted == 1
+	sp.LateAfterSeal = late == 1
 	return &sp, nil
 }
 

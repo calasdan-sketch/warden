@@ -22,7 +22,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/model"
 )
 
 // receiptBody is the canonical signed content. Field order is fixed and must
@@ -44,6 +44,11 @@ type receiptBody struct {
 	KillReason   string   `json:"kill_reason"`
 	KilledBy     string   `json:"killed_by"`
 	PrevHash     string   `json:"prev_hash"`
+	// Trace commitment (added in 0.1.0; omitted from older receipts so their
+	// canonical bodies — and signatures — are unchanged).
+	SpanCount      int64  `json:"span_count,omitempty"`
+	SpansDigest    string `json:"spans_digest,omitempty"`
+	SpansDigestAlg string `json:"spans_digest_alg,omitempty"`
 }
 
 // Signer holds the Ed25519 receipt-signing key.
@@ -53,8 +58,12 @@ type Signer struct {
 }
 
 // KeyID is the stable fingerprint of the signing key.
-func (s *Signer) KeyID() string {
-	sum := sha256.Sum256(s.pub)
+func (s *Signer) KeyID() string { return KeyIDOf(s.pub) }
+
+// KeyIDOf is the fingerprint of any Ed25519 public key (first 16 hex chars
+// of its SHA-256), matching the key_id stamped on receipts.
+func KeyIDOf(pub ed25519.PublicKey) string {
+	sum := sha256.Sum256(pub)
 	return hex.EncodeToString(sum[:])[:16]
 }
 
@@ -111,6 +120,10 @@ type SealInput struct {
 	Guards   []string
 	PrevHash string // head of the chain ("" for genesis)
 	SealedAt time.Time
+	// Spans are the run's spans at seal time; the receipt commits to their
+	// digest so the full trace, not just its totals, is tamper-evident.
+	// nil means "no trace commitment" (legacy behaviour).
+	Spans []*model.Span
 }
 
 // Seal builds, hashes, and signs a receipt for a run.
@@ -141,6 +154,10 @@ func (s *Signer) Seal(in SealInput) (*model.Receipt, string, error) {
 		KilledBy:     killedBy,
 		PrevHash:     in.PrevHash,
 	}
+	if in.Spans != nil {
+		body.SpanCount, body.SpansDigest = SpansDigest(in.Spans)
+		body.SpansDigestAlg = SpansDigestAlg
+	}
 	canonical, err := json.Marshal(body)
 	if err != nil {
 		return nil, "", err
@@ -166,6 +183,8 @@ func (s *Signer) Seal(in SealInput) (*model.Receipt, string, error) {
 		PrevHash:     in.PrevHash,
 		Signature:    base64.StdEncoding.EncodeToString(sig),
 		KeyID:        s.KeyID(),
+		SpanCount:    body.SpanCount,
+		SpansDigest:  body.SpansDigest,
 	}
 	if killReason != "" {
 		rec.KillReason = &killReason
@@ -214,4 +233,28 @@ func VerifyChain(recs []*model.Receipt) error {
 		prev = r.BodyHash
 	}
 	return nil
+}
+
+func errTrace(format string, a ...any) error { return fmt.Errorf("trace: "+format, a...) }
+
+func errUnknownAlg(alg string) error {
+	return fmt.Errorf("trace: unknown digest algorithm %q (newer warden?)", alg)
+}
+
+// SignStatement signs an arbitrary domain-separated statement (e.g. an
+// export header) and returns the base64 signature. The domain string keeps
+// a statement signature from ever being replayable as a receipt signature.
+func (s *Signer) SignStatement(domain string, msg []byte) string {
+	sum := sha256.Sum256(append([]byte(domain+"\n"), msg...))
+	return base64.StdEncoding.EncodeToString(ed25519.Sign(s.priv, sum[:]))
+}
+
+// VerifyStatement checks a SignStatement signature.
+func VerifyStatement(pub ed25519.PublicKey, domain string, msg []byte, sigB64 string) bool {
+	sig, err := base64.StdEncoding.DecodeString(sigB64)
+	if err != nil {
+		return false
+	}
+	sum := sha256.Sum256(append([]byte(domain+"\n"), msg...))
+	return ed25519.Verify(pub, sum[:], sig)
 }

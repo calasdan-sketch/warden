@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	"warden/internal/join"
+	"github.com/calasdan-sketch/warden/internal/join"
 )
 
 func (a *app) cmdReport(args []string) int {

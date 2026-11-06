@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"warden/internal/collect"
-	"warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/collect"
+	"github.com/calasdan-sketch/warden/internal/model"
 )
 
 // TestKillRefusesStalePidfile: a pidfile pointing at a dead PID must never

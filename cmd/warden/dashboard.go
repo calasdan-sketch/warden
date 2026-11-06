@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"warden/internal/server"
+	"github.com/calasdan-sketch/warden/internal/server"
 )
 
 func (a *app) cmdDashboard(args []string) int {

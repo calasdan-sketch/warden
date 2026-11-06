@@ -31,12 +31,12 @@ import (
 	"sync"
 	"time"
 
-	"warden/internal/cost"
-	"warden/internal/model"
-	"warden/internal/policy"
-	"warden/internal/receipt"
-	"warden/internal/redact"
-	"warden/internal/store"
+	"github.com/calasdan-sketch/warden/internal/cost"
+	"github.com/calasdan-sketch/warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/policy"
+	"github.com/calasdan-sketch/warden/internal/receipt"
+	"github.com/calasdan-sketch/warden/internal/redact"
+	"github.com/calasdan-sketch/warden/internal/store"
 )
 
 type wireEvent struct {
@@ -244,11 +244,23 @@ func (c *Collector) SealRun(runID string, status model.RunStatus, kill *model.Ki
 	// the chain head is locked: this keeps sealed_at order consistent with
 	// commit order, so concurrent seals can neither fork the chain nor
 	// scramble its sealed_at ordering.
+	// Snapshot the trace AFTER the claim: from here on every new span for
+	// this run is stored late_after_seal (atomically, see store.InsertSpan),
+	// so the set read now is exactly the set the receipt will commit to.
+	// It must be read before SealChained: that holds the store's only
+	// connection for the duration of the chained transaction.
+	spans, err := c.store.SpansForRun(runID)
+	if err != nil {
+		return nil, err
+	}
+	if spans == nil {
+		spans = []*model.Span{} // non-nil: commit to the empty trace
+	}
 	rec, err := c.store.SealChained(func(prev string) (*model.Receipt, string, error) {
 		now := time.Now().UTC()
 		r.EndedAt = &now
 		return c.signer.Seal(receipt.SealInput{
-			Run: r, Guards: guards, PrevHash: prev, SealedAt: now,
+			Run: r, Guards: guards, PrevHash: prev, SealedAt: now, Spans: spans,
 		})
 	})
 	if err != nil {

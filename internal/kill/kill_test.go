@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"warden/internal/collect"
-	"warden/internal/model"
-	"warden/internal/policy"
-	"warden/internal/receipt"
-	"warden/internal/store"
+	"github.com/calasdan-sketch/warden/internal/collect"
+	"github.com/calasdan-sketch/warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/policy"
+	"github.com/calasdan-sketch/warden/internal/receipt"
+	"github.com/calasdan-sketch/warden/internal/store"
 )
 
 const testPolicyYAML = `

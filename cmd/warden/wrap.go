@@ -8,8 +8,8 @@ import (
 	"syscall"
 	"time"
 
-	"warden/internal/collect"
-	"warden/internal/policy"
+	"github.com/calasdan-sketch/warden/internal/collect"
+	"github.com/calasdan-sketch/warden/internal/policy"
 )
 
 func (a *app) cmdInit(args []string) int {

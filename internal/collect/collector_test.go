@@ -5,13 +5,14 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"warden/internal/model"
-	"warden/internal/policy"
-	"warden/internal/receipt"
-	"warden/internal/store"
+	"github.com/calasdan-sketch/warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/policy"
+	"github.com/calasdan-sketch/warden/internal/receipt"
+	"github.com/calasdan-sketch/warden/internal/store"
 )
 
 func testCollector(t *testing.T, policyYAML string) (*Collector, *store.Store, string) {
@@ -208,15 +209,23 @@ func TestSocketIngestion(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	evs, _ := st.EventsForRun(r.RunID, 10)
-	found := false
-	for _, e := range evs {
-		if e.Kind == "note" && e.Message == "hello" {
-			found = true
+	// The event line is processed after the span line by the same
+	// connection handler; poll for it too instead of racing it.
+	for {
+		evs, _ := st.EventsForRun(r.RunID, 10)
+		found := false
+		for _, e := range evs {
+			if e.Kind == "note" && e.Message == "hello" {
+				found = true
+			}
 		}
-	}
-	if !found {
-		t.Error("socket event not recorded")
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("socket event not recorded")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -272,5 +281,154 @@ func TestReconcileSealsDeadRuns(t *testing.T) {
 	n, err = c.Reconcile(time.Hour)
 	if err != nil || n != 0 {
 		t.Errorf("fresh run should not be reconciled: %d %v", n, err)
+	}
+}
+
+func TestReceiptCommitsToTraceAndLateSpansAreMarked(t *testing.T) {
+	c, st, _ := testCollector(t, "")
+	r, _ := startTestRun(t, c)
+	for _, args := range []string{"git status", "git diff"} {
+		if err := c.EmitSpan(&model.Span{Kind: model.SpanToolCall, Tool: "bash", ArgsSummary: args,
+			RunID: r.RunID, AgentID: r.AgentID, FleetID: r.FleetID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.SealRun(r.RunID, model.RunCompleted, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, body, err := st.GetReceipt(r.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spans, _ := st.SpansForRun(r.RunID)
+	if late, covered, err := receipt.VerifyTrace(body, spans); err != nil || !covered || late != 0 {
+		t.Fatalf("fresh trace should verify: late=%d covered=%v err=%v", late, covered, err)
+	}
+
+	// A span arriving after the seal is kept but marked late, and does not
+	// break verification of the covered set.
+	late := &model.Span{Kind: model.SpanToolCall, Tool: "bash", ArgsSummary: "git log",
+		RunID: r.RunID, AgentID: r.AgentID, FleetID: r.FleetID}
+	if err := c.EmitSpan(late); err != nil {
+		t.Fatal(err)
+	}
+	if !late.LateAfterSeal {
+		t.Fatal("span after seal must be marked late_after_seal")
+	}
+	spans, _ = st.SpansForRun(r.RunID)
+	if n, covered, err := receipt.VerifyTrace(body, spans); err != nil || !covered || n != 1 {
+		t.Fatalf("late span should be reported, not fail: late=%d err=%v", n, err)
+	}
+
+	// Tampering with a covered span is detected.
+	if _, err := st.DB().Exec(`UPDATE spans SET args_summary='ls' WHERE run_id=? AND args_summary='git diff'`, r.RunID); err != nil {
+		t.Fatal(err)
+	}
+	spans, _ = st.SpansForRun(r.RunID)
+	if _, _, err := receipt.VerifyTrace(body, spans); err == nil {
+		t.Fatal("modified span must fail trace verification")
+	}
+	// Hiding a covered span by flipping it to "late" is detected too.
+	if _, err := st.DB().Exec(`UPDATE spans SET args_summary='git diff' WHERE run_id=? AND args_summary='ls'`, r.RunID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB().Exec(`UPDATE spans SET late=1 WHERE run_id=? AND args_summary='git status'`, r.RunID); err != nil {
+		t.Fatal(err)
+	}
+	spans, _ = st.SpansForRun(r.RunID)
+	if _, _, err := receipt.VerifyTrace(body, spans); err == nil {
+		t.Fatal("covered span flipped to late must fail trace verification")
+	}
+	// Deleting a covered span is detected.
+	if _, err := st.DB().Exec(`DELETE FROM spans WHERE run_id=? AND args_summary='git status'`, r.RunID); err != nil {
+		t.Fatal(err)
+	}
+	spans, _ = st.SpansForRun(r.RunID)
+	if _, _, err := receipt.VerifyTrace(body, spans); err == nil {
+		t.Fatal("deleted span must fail trace verification")
+	}
+}
+
+func TestSessionRunsKillSwitchAndContinuation(t *testing.T) {
+	c, st, _ := testCollector(t, "")
+	opts := RunOptions{AgentID: "claude-code", FleetID: "default"}
+	s1, err := c.EnsureSessionRun("claude-code", "sess", opts)
+	if err != nil || s1.Blocked {
+		t.Fatalf("first: %+v %v", s1, err)
+	}
+	again, _ := c.EnsureSessionRun("claude-code", "sess", opts)
+	if again.Run.RunID != s1.Run.RunID {
+		t.Fatal("same session must resolve to the same live run")
+	}
+	// Normal end: the next call continues in a linked segment.
+	if _, err := c.SealRun(s1.Run.RunID, model.RunCompleted, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	s2, _ := c.EnsureSessionRun("claude-code", "sess", opts)
+	if s2.Run.RunID == s1.Run.RunID || s2.Run.ParentRunID == nil || *s2.Run.ParentRunID != s1.Run.RunID {
+		t.Fatalf("continuation should link to previous segment: %+v", s2.Run)
+	}
+	// Kill: the session stays blocked.
+	kr := &model.KillRecord{Scope: model.KillScopeRun, Actor: "dan", Reason: "runaway", Target: s2.Run.RunID}
+	if _, err := c.SealRun(s2.Run.RunID, model.RunKilledOperator, kr, nil); err != nil {
+		t.Fatal(err)
+	}
+	s3, _ := c.EnsureSessionRun("claude-code", "sess", opts)
+	if !s3.Blocked || !strings.Contains(s3.BlockReason, "runaway") {
+		t.Fatalf("killed session must stay blocked: %+v", s3)
+	}
+	// Quarantine blocks every session of the agent.
+	if err := st.QuarantineAgent("claude-code", time.Now().Add(time.Hour), "incident"); err != nil {
+		t.Fatal(err)
+	}
+	s4, _ := c.EnsureSessionRun("claude-code", "other-session", opts)
+	if !s4.Blocked {
+		t.Fatal("quarantined agent must be blocked")
+	}
+}
+
+func TestSessionRunManySegmentsAndConcurrency(t *testing.T) {
+	c, _, _ := testCollector(t, "")
+	opts := RunOptions{AgentID: "codex", FleetID: "default"}
+	var prev string
+	for i := 0; i < 40; i++ { // 40 Codex turns, each sealed by Stop
+		s, err := c.EnsureSessionRun("codex", "long", opts)
+		if err != nil || s.Blocked {
+			t.Fatalf("turn %d: %+v %v", i, s, err)
+		}
+		if s.Run.RunID != SessionRunID("codex", "long", i) {
+			t.Fatalf("turn %d resolved to the wrong segment", i)
+		}
+		if i > 0 && (s.Run.ParentRunID == nil || *s.Run.ParentRunID != prev) {
+			t.Fatalf("turn %d not linked to %s", i, prev)
+		}
+		prev = s.Run.RunID
+		if _, err := c.SealRun(s.Run.RunID, model.RunCompleted, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Parallel tool calls in one turn must land in one run.
+	ids := make(chan string, 16)
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s, err := c.EnsureSessionRun("codex", "par", opts)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			ids <- s.Run.RunID
+		}()
+	}
+	wg.Wait()
+	close(ids)
+	seen := map[string]bool{}
+	for id := range ids {
+		seen[id] = true
+	}
+	if len(seen) != 1 {
+		t.Fatalf("parallel hooks split across %d runs", len(seen))
 	}
 }

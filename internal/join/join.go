@@ -25,9 +25,9 @@ import (
 	"strings"
 	"time"
 
-	"warden/internal/collect"
-	"warden/internal/model"
-	"warden/internal/store"
+	"github.com/calasdan-sketch/warden/internal/collect"
+	"github.com/calasdan-sketch/warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/store"
 )
 
 // Source identifies an emitter.

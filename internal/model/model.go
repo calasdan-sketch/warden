@@ -97,6 +97,12 @@ type Span struct {
 
 	// Redacted reports whether any field was redacted by the collector before emission.
 	Redacted bool `json:"redacted,omitempty"`
+
+	// LateAfterSeal marks a span recorded after its run's receipt was
+	// sealed (e.g. a sibling-tool feed ingested later). Such spans are kept
+	// for the audit trail but are NOT covered by the receipt's signed trace
+	// digest; verify reports them separately. Set by the store, atomically.
+	LateAfterSeal bool `json:"late_after_seal,omitempty"`
 }
 
 // RunStatus is the lifecycle state of a run.
@@ -215,6 +221,10 @@ type Receipt struct {
 	PrevHash  string `json:"prev_hash"` // body_hash of the previously sealed receipt (genesis: "")
 	Signature string `json:"signature"` // Ed25519 over body_hash, base64
 	KeyID     string `json:"key_id"`    // fingerprint of the signing key
+
+	// Trace commitment: number of covered spans and their set digest.
+	SpanCount   int64  `json:"span_count,omitempty"`
+	SpansDigest string `json:"spans_digest,omitempty"`
 }
 
 // KillScope enumerates the four kill scopes with exact semantics.

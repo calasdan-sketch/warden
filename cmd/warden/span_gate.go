@@ -7,9 +7,9 @@ import (
 	"os"
 	"time"
 
-	"warden/internal/model"
-	"warden/internal/policy"
-	"warden/internal/redact"
+	"github.com/calasdan-sketch/warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/policy"
+	"github.com/calasdan-sketch/warden/internal/redact"
 )
 
 // cmdSpan emits one span from a framework hook.

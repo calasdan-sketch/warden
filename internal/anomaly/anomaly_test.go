@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"warden/internal/model"
-	"warden/internal/store"
+	"github.com/calasdan-sketch/warden/internal/model"
+	"github.com/calasdan-sketch/warden/internal/store"
 )
 
 var fixedNow = time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)

@@ -128,12 +128,15 @@ func RedactMap(m map[string]string) (map[string]string, bool) {
 // credential-adjacent gate — that path is fail-closed into a human approval
 // and would also echo the value into the policy reason as "the path".
 func credentialAdjacent(path string) bool {
+	// Windows-style paths (from harnesses on Windows/WSL) use backslashes;
+	// judge them by the same rules.
+	path = strings.ReplaceAll(path, `\`, "/")
 	base := strings.ToLower(filepath.Base(path))
 	patterns := []string{
 		"*.pem", "*.key", "*.p12", "*.pfx", "*.jks", "*.keystore",
 		".env*", "*.env", "id_rsa*", "id_ed25519*", "id_ecdsa*",
 		"*credentials*", ".npmrc", ".pypirc",
-		"kubeconfig", "config.json",
+		"kubeconfig", "config.json", ".netrc", "_netrc",
 	}
 	for _, p := range patterns {
 		if ok, _ := filepath.Match(p, base); ok {
@@ -146,7 +149,7 @@ func credentialAdjacent(path string) bool {
 	}
 	// dotfiles in home-ish credential dirs
 	lower := strings.ToLower(path)
-	for _, d := range []string{".aws/", ".ssh/", ".gnupg/", ".docker/"} {
+	for _, d := range []string{".aws/", ".ssh/", ".gnupg/", ".docker/", ".kube/", "gcloud/"} {
 		if strings.Contains(lower, d) {
 			return true
 		}

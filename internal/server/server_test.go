@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"warden/internal/anomaly"
-	"warden/internal/collect"
-	"warden/internal/kill"
-	"warden/internal/policy"
-	"warden/internal/receipt"
-	"warden/internal/store"
+	"github.com/calasdan-sketch/warden/internal/anomaly"
+	"github.com/calasdan-sketch/warden/internal/collect"
+	"github.com/calasdan-sketch/warden/internal/kill"
+	"github.com/calasdan-sketch/warden/internal/policy"
+	"github.com/calasdan-sketch/warden/internal/receipt"
+	"github.com/calasdan-sketch/warden/internal/store"
 )
 
 func testServer(t *testing.T, tokens map[string]Role) (*Server, *collect.Collector, *store.Store, string) {
