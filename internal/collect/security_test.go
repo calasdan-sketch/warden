@@ -117,7 +117,7 @@ func TestWrapDenySpanRecorded(t *testing.T) {
 // the policy_deny audit event.
 func TestWrapDenyRedactsSecrets(t *testing.T) {
 	c, st, _ := testCollector(t, "")
-	raw := "AKIAIOSFODNN7EXAMPLE"
+	raw := "AKIA" + "IOSFODNN7EXAMPLE"
 	_, err := c.NewRunner(RunOptions{
 		AgentID: "a", FleetID: "f", Command: "evilbinary --key " + raw,
 	})

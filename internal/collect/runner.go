@@ -3,11 +3,11 @@ package collect
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/calasdan-sketch/warden/internal/procgrp"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/calasdan-sketch/warden/internal/model"
@@ -88,8 +88,9 @@ func (c *Collector) NewRunner(opts RunOptions) (*Runner, error) {
 		return nil, fmt.Errorf("refused by policy: %s", res.Reason)
 	}
 
-	cmd := exec.Command("sh", "-c", opts.Command)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	shProg, shFlag := procgrp.Shell()
+	cmd := exec.Command(shProg, shFlag, opts.Command)
+	procgrp.Configure(cmd)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -211,11 +212,11 @@ func (r *Runner) Shutdown(reason, actor string) error {
 
 	if r.cmd.Process != nil && r.pgid > 0 {
 		deadline := time.Now().Add(KillGrace)
-		_ = syscall.Kill(-r.pgid, syscall.SIGTERM)
+		procgrp.Term(r.pgid)
 		select {
 		case <-r.waitDone:
 		case <-time.After(KillGrace):
-			_ = syscall.Kill(-r.pgid, syscall.SIGKILL)
+			procgrp.Kill(r.pgid)
 			<-r.waitDone
 		}
 		// The direct child exiting is not the whole tree: other members of
@@ -223,7 +224,7 @@ func (r *Runner) Shutdown(reason, actor string) error {
 		// SIGTERM). Wait out the rest of the grace for the group, then
 		// SIGKILL whatever is left, so "killed" means the tree is gone.
 		if !waitGroupGone(r.pgid, time.Until(deadline)) {
-			_ = syscall.Kill(-r.pgid, syscall.SIGKILL)
+			procgrp.Kill(r.pgid)
 			waitGroupGone(r.pgid, 2*time.Second)
 		}
 	}
@@ -324,7 +325,7 @@ func ReadPidFile(dataDir, runID string) (*PidFile, error) {
 func waitGroupGone(pgid int, d time.Duration) bool {
 	end := time.Now().Add(d)
 	for {
-		if err := syscall.Kill(-pgid, 0); err == syscall.ESRCH {
+		if procgrp.GroupGone(pgid) {
 			return true
 		}
 		if time.Now().After(end) {

@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/calasdan-sketch/warden/internal/anomaly"
 	"github.com/calasdan-sketch/warden/internal/collect"
@@ -32,7 +33,7 @@ import (
 )
 
 // version is overridden at release build time: -ldflags "-X main.version=..."
-var version = "0.1.0"
+var version = "0.2.0"
 
 // app holds the wired dependencies for CLI commands.
 type app struct {
@@ -142,11 +143,20 @@ func main() {
 		return
 	case "demo":
 		os.Exit(cmdDemo(rest))
+	case "bench":
+		os.Exit(cmdBench(rest))
+	case "replay":
+		// Replaying an export is for auditors too: no data dir needed.
+		for _, x := range rest {
+			if x == "--bundle" || strings.HasPrefix(x, "--bundle=") || x == "-bundle" {
+				os.Exit(cmdReplayWith(nil, rest))
+			}
+		}
 	case "verify":
 		// Bundle verification is for auditors: it must not need (or create)
 		// a warden data dir.
 		if b, pk, au, ok := bundleFlags(rest); ok {
-			os.Exit(cmdVerifyBundle(b, pk, au))
+			os.Exit(cmdVerifyBundleAnchors(b, pk, au, flagValue(rest, "anchors")))
 		}
 	}
 
@@ -190,6 +200,12 @@ func main() {
 		code = a.cmdExport(rest)
 	case "scan":
 		code = a.cmdScan(rest)
+	case "anchor":
+		code = a.cmdAnchor(rest)
+	case "runs":
+		code = a.cmdRuns(rest)
+	case "replay":
+		code = a.cmdReplay(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", cmd)
 		usage()
@@ -217,8 +233,15 @@ Usage: warden [--dir DIR] [--policy FILE] <command> [flags]
   approve                 Decide a pending approval: --id N --decision approved|denied
   approvals               List pending approvals
   export                  Audit trail: --format jsonl (verifiable bundle) | otlp [--endpoint URL]
+  anchor [--out FILE]     Emit a signed chain-head anchor; ship it off the machine
+                          (verify --anchors FILE then proves history was not rewritten)
+  runs                    List recent runs (find the id to replay)
+  replay <run|last>       Step through a recorded run: timeline, state at any step (--step N),
+                          what-if under a candidate policy (--what-if FILE), --html FILE, --json
+                          (--bundle FILE --pubkey KEY replays an export with no data dir)
   scan                    Run anomaly evaluation over live runs now
   init                    Initialize the data dir (policy template + signing key)
+  bench [--n N]           Measure hook latency, policy and redaction cost on this machine
   version                 Print version
 
 Global flags: --dir DIR (default ~/.warden, or $WARDEN_DIR), --policy FILE
@@ -233,6 +256,7 @@ func bundleFlags(args []string) (bundle, pubkey string, allowUnsigned, ok bool) 
 	p := fs.String("pubkey", "", "")
 	au := fs.Bool("allow-unsigned", false, "")
 	_ = fs.String("run", "", "")
+	_ = fs.String("anchors", "", "")
 	if err := fs.Parse(args); err != nil || *b == "" {
 		return "", "", false, false
 	}
@@ -251,4 +275,17 @@ func parseArgs(fs *flag.FlagSet, args []string) bool {
 		return false
 	}
 	return true
+}
+
+// flagValue returns the value of --name VALUE or --name=VALUE ("" if absent).
+func flagValue(args []string, name string) string {
+	for i, a := range args {
+		if a == "--"+name && i+1 < len(args) {
+			return args[i+1]
+		}
+		if strings.HasPrefix(a, "--"+name+"=") {
+			return a[len(name)+3:]
+		}
+	}
+	return ""
 }

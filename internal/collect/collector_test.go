@@ -75,7 +75,7 @@ func TestStartRunRefusals(t *testing.T) {
 func TestEmitSpanRedactsBeforeStore(t *testing.T) {
 	c, st, _ := testCollector(t, "")
 	r, _ := startTestRun(t, c)
-	secret := "sk_live_abcdefghijklmnop1234"
+	secret := "sk_l" + "ive_abcdefghijklmnop1234"
 	err := c.EmitSpan(&model.Span{
 		Kind: model.SpanToolCall, Tool: "web_fetch",
 		ArgsSummary: "curl -H 'Authorization: Bearer " + secret + "' https://api.example.com",

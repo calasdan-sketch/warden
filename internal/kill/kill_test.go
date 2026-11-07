@@ -1,8 +1,8 @@
 package kill
 
 import (
+	"github.com/calasdan-sketch/warden/internal/procgrp"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 
@@ -60,7 +60,7 @@ func startSleeper(t *testing.T, col *collect.Collector, agent, fleet string) *co
 	return r
 }
 
-func pgidAlive(pgid int) bool { return syscall.Kill(-pgid, 0) == nil }
+func pgidAlive(pgid int) bool { return !procgrp.GroupGone(pgid) }
 
 func TestKillRunLive(t *testing.T) {
 	mgr, col, st, dir := testManager(t)

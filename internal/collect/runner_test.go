@@ -1,7 +1,7 @@
 package collect
 
 import (
-	"syscall"
+	"github.com/calasdan-sketch/warden/internal/procgrp"
 	"testing"
 	"time"
 
@@ -126,7 +126,7 @@ func TestWrapKillLive(t *testing.T) {
 	}
 	// The process tree is actually dead.
 	time.Sleep(200 * time.Millisecond)
-	if err := syscall.Kill(-pf.PGID, 0); err == nil {
+	if !procgrp.GroupGone(pf.PGID) {
 		t.Error("process group should be dead after kill")
 	}
 	// Receipt sealed even on kill, and verifiable.

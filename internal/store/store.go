@@ -5,8 +5,10 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -26,16 +28,20 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	db.SetMaxOpenConns(1) // serialize writes; WAL keeps readers flowing
-	for _, p := range []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=5000",
-		"PRAGMA foreign_keys=ON",
-		"PRAGMA synchronous=NORMAL",
-	} {
+	// busy_timeout FIRST: every later statement (including the journal-mode
+	// switch) must wait for a competing writer instead of failing at once.
+	// Fleets run many short-lived `warden hook` processes against one file;
+	// before this ordering, ~20% of calls under 8-way concurrency failed with
+	// "database is locked" and were denied fail-closed.
+	for _, p := range []string{"PRAGMA busy_timeout=5000", "PRAGMA foreign_keys=ON", "PRAGMA synchronous=NORMAL"} {
 		if _, err := db.Exec(p); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("pragma %q: %w", p, err)
 		}
+	}
+	if err := ensureWAL(db); err != nil {
+		db.Close()
+		return nil, err
 	}
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
@@ -43,6 +49,30 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// ensureWAL switches the database to WAL mode only when it is not already in
+// it (the switch needs an exclusive lock; a no-op check does not), retrying
+// while another process holds the lock. ":memory:" databases stay as they are.
+func ensureWAL(db *sql.DB) error {
+	var mode string
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := db.QueryRow("PRAGMA journal_mode").Scan(&mode)
+		if err == nil && (strings.EqualFold(mode, "wal") || strings.EqualFold(mode, "memory")) {
+			return nil
+		}
+		if err == nil {
+			err = db.QueryRow("PRAGMA journal_mode=WAL").Scan(&mode)
+			if err == nil {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("pragma journal_mode=WAL: %w", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // Close releases the database.
@@ -60,35 +90,61 @@ func parseTS(v sql.NullString) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, v.String)
 }
 
+var migrations = []string{schemaV1, schemaV2, schemaV3, schemaV4, schemaV5}
+
+// currentVersion reads the schema version without taking a write lock.
+func (s *Store) currentVersion() (int, error) {
+	var v int
+	err := s.db.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_version`).Scan(&v)
+	return v, err
+}
+
+// migrate brings the schema forward. The common case (already current) takes
+// no write lock at all, so a burst of hook processes does not serialize on it.
+// When work is needed it runs inside BEGIN IMMEDIATE and re-reads the version
+// under the lock, so two processes opening a fresh database cannot both apply
+// the same migration (the second sees the first's work and does nothing).
 func (s *Store) migrate() error {
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)`); err != nil {
+	if v, err := s.currentVersion(); err == nil && v >= len(migrations) {
+		return nil
+	}
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)`); err != nil {
 		return err
 	}
 	var v int
-	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_version`).Scan(&v); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(version),0) FROM schema_version`).Scan(&v); err != nil {
 		return err
 	}
-	migrations := []string{schemaV1, schemaV2, schemaV3, schemaV4, schemaV5}
 	for i, m := range migrations {
 		if i+1 <= v {
 			continue
 		}
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(m); err != nil {
-			tx.Rollback()
+		if _, err := conn.ExecContext(ctx, m); err != nil {
 			return fmt.Errorf("migration %d: %w", i+1, err)
 		}
-		if _, err := tx.Exec(`INSERT INTO schema_version(version) VALUES(?)`, i+1); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
+		if _, err := conn.ExecContext(ctx, `INSERT INTO schema_version(version) VALUES(?)`, i+1); err != nil {
 			return err
 		}
 	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
 	return nil
 }
 

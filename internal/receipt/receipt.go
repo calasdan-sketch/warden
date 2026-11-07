@@ -86,16 +86,35 @@ const (
 	pubName  = "receipt.pub"
 )
 
-// LoadOrCreate loads the receipt-signing key from dir, creating it (0600) if absent.
+// LoadOrCreate loads the receipt-signing key from dir, creating it (0600) if
+// absent. Creation is atomic: when several processes start at once on a fresh
+// directory (a fleet of hook processes), exactly one key is installed and
+// every process ends up with that same key. The key is written to a private
+// temp file and hard-linked into place, so no reader can ever see a partial
+// key and no second key can overwrite the first.
 func LoadOrCreate(dir string) (*Signer, error) {
 	privPath := filepath.Join(dir, privName)
 	pubPath := filepath.Join(dir, pubName)
-	if b, err := os.ReadFile(privPath); err == nil {
+	load := func() (*Signer, error) {
+		b, err := os.ReadFile(privPath)
+		if err != nil {
+			return nil, err
+		}
 		priv := ed25519.PrivateKey(b)
 		if len(priv) != ed25519.PrivateKeySize {
 			return nil, fmt.Errorf("bad private key length in %s", privPath)
 		}
 		return &Signer{priv: priv, pub: priv.Public().(ed25519.PublicKey)}, nil
+	}
+	finish := func(s *Signer) (*Signer, error) {
+		// The public key is derived, so rewriting it is idempotent.
+		if err := writeAtomic(pubPath, []byte(s.pub), 0o644); err != nil {
+			return nil, err
+		}
+		return s, nil
+	}
+	if s, err := load(); err == nil {
+		return s, nil
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
@@ -106,13 +125,36 @@ func LoadOrCreate(dir string) (*Signer, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(privPath, []byte(s.priv), 0o600); err != nil {
+	tmp := fmt.Sprintf("%s.%d.%d.tmp", privPath, os.Getpid(), time.Now().UnixNano())
+	if err := os.WriteFile(tmp, []byte(s.priv), 0o600); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(pubPath, []byte(s.pub), 0o644); err != nil {
-		return nil, err
+	defer os.Remove(tmp)
+	if err := os.Link(tmp, privPath); err != nil {
+		if os.IsExist(err) { // another process won the race: use its key
+			w, lerr := load()
+			if lerr != nil {
+				return nil, lerr
+			}
+			return finish(w)
+		}
+		return nil, fmt.Errorf("install signing key: %w", err)
 	}
-	return s, nil
+	return finish(s)
+}
+
+// writeAtomic writes via a temp file and rename so readers never see a
+// partial file.
+func writeAtomic(path string, data []byte, mode os.FileMode) error {
+	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
+	if err := os.WriteFile(tmp, data, mode); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // SealInput is everything needed to seal one receipt.

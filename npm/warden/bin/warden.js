@@ -14,6 +14,8 @@ const PLATFORMS = {
   "linux-arm64": "@decnutz/warden-linux-arm64",
   "darwin-x64": "@decnutz/warden-darwin-x64",
   "darwin-arm64": "@decnutz/warden-darwin-arm64",
+  "win32-x64": "@decnutz/warden-win32-x64",
+  "win32-arm64": "@decnutz/warden-win32-arm64",
 };
 
 function findBinary() {
@@ -25,16 +27,16 @@ function findBinary() {
   if (!pkg) {
     fail(
       `warden has no prebuilt binary for ${key}.\n` +
-        `Supported: ${Object.keys(PLATFORMS).join(", ")} (warden uses POSIX process groups; Windows is not supported yet).\n` +
+        `Supported: ${Object.keys(PLATFORMS).join(", ")} (Windows builds are experimental and have not been run on a real Windows host yet).\n` +
         `Build from source instead: go install github.com/calasdan-sketch/warden/cmd/warden@latest`
     );
   }
   // 2. The platform package installed via optionalDependencies.
   try {
-    return require.resolve(`${pkg}/bin/warden`);
+    return require.resolve(`${pkg}/bin/${process.platform === "win32" ? "warden.exe" : "warden"}`);
   } catch (_) {
     // 3. A binary vendored next to this package (local builds / tarballs).
-    const local = path.join(__dirname, "..", "vendor", key, "warden");
+    const local = path.join(__dirname, "..", "vendor", key, process.platform === "win32" ? "warden.exe" : "warden");
     if (fs.existsSync(local)) return local;
   }
   fail(

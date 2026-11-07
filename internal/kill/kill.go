@@ -16,7 +16,7 @@ package kill
 
 import (
 	"fmt"
-	"syscall"
+	"github.com/calasdan-sketch/warden/internal/procgrp"
 	"time"
 
 	"github.com/calasdan-sketch/warden/internal/collect"
@@ -95,11 +95,11 @@ func (m *Manager) killPGIDVerified(pf *collect.PidFile, grace time.Duration) str
 
 // killPGID sends SIGTERM, waits up to grace, then SIGKILL. It reports what happened.
 func (m *Manager) killPGID(pgid int, grace time.Duration) string {
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	procgrp.Term(pgid)
 	if waitPGIDExit(pgid, grace) {
 		return "killed: SIGTERM sufficient"
 	}
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	procgrp.Kill(pgid)
 	if waitPGIDExit(pgid, 5*time.Second) {
 		return "killed: SIGTERM timed out, SIGKILL delivered"
 	}
@@ -109,11 +109,10 @@ func (m *Manager) killPGID(pgid int, grace time.Duration) string {
 func waitPGIDExit(pgid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		err := syscall.Kill(-pgid, 0)
-		if err == syscall.ESRCH {
+		if procgrp.GroupGone(pgid) {
 			return true // no such process group: dead
 		}
-		// EPERM (or nil) means the group exists — keep waiting.
+		// Still present — keep waiting.
 		time.Sleep(200 * time.Millisecond)
 	}
 	return false
@@ -209,7 +208,7 @@ func (m *Manager) FreezeFleet(fleetID string, hardDeadline time.Duration, reason
 		}
 		if pf, err := collect.ReadPidFile(m.dataDir, r.RunID); err == nil && pf.PGID > 0 {
 			if collect.PidAliveForRun(m.dataDir, r.RunID) {
-				_ = syscall.Kill(-pf.PGID, syscall.SIGTERM)
+				procgrp.Term(pf.PGID)
 			}
 			collect.RemovePidFile(m.dataDir, r.RunID)
 			signaled++

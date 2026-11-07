@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+Expert deep-dive round 2: found by testing warden the way a platform team, a
+security reviewer and an incident responder would. Everything below has a test; the
+two corpora and `warden bench` are committed so the numbers can be re-run.
+
+### Fixed (found by concurrency testing)
+- **Hook calls were wrongly denied under load.** With 8 or more `warden hook`
+  processes starting together, 12-32% failed with `database is locked` and were
+  denied fail-closed. `busy_timeout` is now set before the WAL switch, the WAL switch
+  only happens when needed (with retry), and migrations take no write lock when the
+  schema is current. 0 failures in 2400 concurrent calls afterwards.
+- **First-run race.** Two processes opening a fresh database could both apply a
+  migration (`UNIQUE constraint failed: schema_version`). Migrations now run in
+  `BEGIN IMMEDIATE` and re-check the version under the lock.
+- **Two signing keys on a fresh data dir.** Concurrent first starts could each
+  generate a key and overwrite the other, leaving receipts signed by a key no longer on
+  disk. The key is now installed atomically (temp file plus hard link): exactly one key
+  wins and everyone loads it.
+
+### Security
+- **Redaction recall 14/46 -> 46/46 on a 46-case corpus** (secrets built at runtime),
+  with 13 benign strings (`max_tokens=1024`, commit hashes, UUIDs) left untouched.
+  New: npm, Hugging Face, GitLab, SendGrid, Shopify, Slack/Discord webhooks, Stripe
+  webhook secrets, Google OAuth, `sk-proj-`/`sk-svcacct-` keys, AWS temporary keys, AWS
+  secret keys, Azure and SAS secrets, `user:password@` in any URL scheme, `Authorization`
+  (Basic/Bearer/any) and API-key headers, `--password x` / `--token x` flags,
+  `mysql -pSECRET`, assignments with spaces or quotes, truncated and encrypted private
+  keys, base64-encoded vendor tokens. A literal pre-filter keeps clean text fast.
+- Zero-width, bidi-override and control characters (including ESC) are stripped from
+  stored text before matching, so an invisible character can neither hide a secret nor
+  spoof what a reviewer reads.
+- **Shell policy evasion corpus 18/57 -> 57/57 blocked** (28 benign commands still
+  allowed). Closed: redirections and `-o`/`--output` writes to startup files, system
+  paths, git hooks, autostart and raw devices (even through allowlisted `echo`/`sort`/`git`);
+  `git push|fetch|clone|remote` to hosts outside `egress.allow_hosts`; environment dumps
+  (`env`, `set`, `export -p`, `/proc/*/environ`); more credential stores (`.pgpass`,
+  `.vault-token`, keychains, browser profiles, `terraform.tfstate`, `/etc/shadow`, ...).
+- Shell commands over 256 KiB are refused instead of analyzed (analysis time is linear
+  in length; a 4 MB payload took seconds).
+- Fuzz targets for the policy engine and the redactor (no panics, bounded time and
+  growth, idempotent redaction).
+
+### Added
+- **`warden replay`**: step through a recorded run. Verified/tampered banner first
+  (exit 3 on tamper), timeline with verdicts, `--step N` state (calls, denies, tokens,
+  cost, files, hosts, surrounding steps), `--only-gated`, `--what-if policy.yaml`
+  (counterfactual re-judging of recorded calls), `--json`, `--html FILE` (single
+  self-contained page, strict CSP, keyboard stepping), and `--bundle FILE --pubkey KEY`
+  to replay an export with no data dir. `warden runs` lists runs.
+- **`warden anchor`** and **`verify --anchors FILE`** (also for `--bundle`): signed
+  chain-head statements to ship off the machine. Detects deleted receipts and a fully
+  re-signed rewrite, even with a stolen signing key.
+- **`warden bench`**: hook round-trip latency (p50/p95/p99), policy and redaction cost.
+- **Windows (experimental).** Process-group handling moved behind `internal/procgrp`
+  (POSIX groups on Unix; new process group plus `taskkill /T` on Windows). warden builds
+  and vets for windows/amd64 and windows/arm64; the npm script and launcher gained
+  `win32-x64` and `win32-arm64`. Not yet run on a real Windows host.
+
+### Changed
+- `warden demo` points at `runs` / `replay` at the end.
+- Version 0.2.0; 0.1.0 was never published, so its notes follow unchanged.
+
 ## 0.1.0 (unreleased)
 
 The first build intended for npm with real binaries. `@decnutz/warden@0.0.1`

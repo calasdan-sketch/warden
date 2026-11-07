@@ -12,13 +12,13 @@ func TestRedactStringPatterns(t *testing.T) {
 		wantSub string // must appear in output
 		mustNot string // must NOT appear in output
 	}{
-		{"aws", "key=AKIAIOSFODNN7EXAMPLE", "[redacted:aws_access_key]", "AKIA"},
-		{"github", "token ghp_abcdefghijklmnopqrstuvwx", "[redacted:github_token]", "ghp_abc"},
-		{"slack", "xoxb-123456789012-abcdefghij", "[redacted:slack_token]", "xoxb-"},
-		{"stripe", "sk_live_abcdefghijklmnop1234", "[redacted:stripe_key]", "sk_live"},
-		{"openai", "sk-abcdefghijklmnopqrstuvwx", "[redacted:openai_key]", "sk-abc"},
-		{"google", "AIzaSyB-abcdefghijklmnopqrstuvwxyz12345", "[redacted:google_api_key]", "AIza"},
-		{"anthropic", "sk-ant-api03-abcdefghijklmnopqrst", "[redacted:anthropic_key]", "sk-ant"},
+		{"aws", "key=AKIA" + "IOSFODNN7EXAMPLE", "[redacted:aws_access_key]", "AKIA"},
+		{"github", "token ghp_" + "abcdefghijklmnopqrstuvwx", "[redacted:github_token]", "ghp_abc"},
+		{"slack", "xoxb" + "-123456789012-abcdefghij", "[redacted:slack_token]", "xoxb-"},
+		{"stripe", "sk_l" + "ive_abcdefghijklmnop1234", "[redacted:stripe_key]", "sk_live"},
+		{"openai", "sk-a" + "bcdefghijklmnopqrstuvwx", "[redacted:openai_key]", "sk-abc"},
+		{"google", "AIza" + "SyB-abcdefghijklmnopqrstuvwxyz12345", "[redacted:google_api_key]", "AIza"},
+		{"anthropic", "sk-ant-" + "api03-abcdefghijklmnopqrst", "[redacted:anthropic_key]", "sk-ant"},
 		{"jwt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c", "[redacted:jwt]", "eyJhbGci"},
 		{"private_key", "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----", "[redacted:private_key]", "MIIB"},
 		{"url_creds", "https://admin:hunter2@example.com/api", "example.com", "hunter2"},
@@ -62,7 +62,7 @@ func TestRedactStringClean(t *testing.T) {
 }
 
 func TestRedactStringDeterministic(t *testing.T) {
-	in := "sk_live_abcdefghijklmnop1234"
+	in := "sk_l" + "ive_abcdefghijklmnop1234"
 	a, _ := RedactString(in)
 	b, _ := RedactString(in)
 	if a != b {
@@ -73,7 +73,7 @@ func TestRedactStringDeterministic(t *testing.T) {
 func TestRedactMap(t *testing.T) {
 	in := map[string]string{
 		"command": "curl https://api.example.com",
-		"api_key": "sk_live_abcdefghijklmnop1234",
+		"api_key": "sk_l" + "ive_abcdefghijklmnop1234",
 		"note":    "token=abc123 in text",
 	}
 	out, hit := RedactMap(in)

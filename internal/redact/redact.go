@@ -8,6 +8,7 @@
 package redact
 
 import (
+	"encoding/base64"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -17,68 +18,230 @@ import (
 type rule struct {
 	name string
 	re   *regexp.Regexp
+	// repl is an optional template ($1, $2 ...) for keep-the-key rules. When
+	// empty the whole match becomes [redacted:name].
+	repl string
+	// guard, when set, can veto a match (false = leave it alone), so a rule
+	// can be broad without redacting telemetry such as max_tokens=1000.
+	guard func(sub []string) bool
+	// hints are lowercase literals; the regexp only runs when the text holds
+	// at least one of them. It is a pure speed-up (about 40x on large, clean
+	// input) and never changes what is matched.
+	hints []string
+}
+
+// hintsByRule lists the cheap literal pre-filters. A rule absent here always
+// runs.
+var hintsByRule = map[string][]string{
+	"aws_access_key": {"akia", "asia"}, "github_token": {"gh"}, "github_pat": {"github_pat_"},
+	"gitlab_token": {"gl"}, "slack_token": {"xox"}, "slack_webhook": {"hooks.slack.com"},
+	"discord_webhook": {"/webhooks/"}, "stripe_key": {"_live_", "_test_"}, "stripe_webhook_secret": {"whsec_"},
+	"google_api_key": {"aiza"}, "google_oauth_token": {"ya29."}, "anthropic_key": {"sk-ant-"},
+	"openai_key": {"sk-"}, "npm_token": {"npm_"}, "huggingface_token": {"hf_"}, "sendgrid_key": {"sg."},
+	"shopify_token": {"shp"}, "digitalocean_token": {"dop_v1_"}, "docker_pat": {"dckr_pat_"},
+	"private_key": {"private key"}, "jwt": {"eyj"}, "url_credentials": {"://"},
+	"azure_secret": {"key", "signature"}, "sas_signature": {"sig="},
+	"auth_header":       {"authorization"},
+	"api_key_header":    {"api-key", "apikey", "auth-token", "access-token", "gitlab-token", "github-token", "private-token", "subscription-key"},
+	"json_secret_value": {"key", "secret", "pass", "pwd", "token", "credential", "bearer"},
+	"cli_secret_flag":   {"-"}, "mysql_password": {"mysql", "mariadb"},
+	"kv_secret_value": {"key", "secret", "pass", "pwd", "token", "credential"},
+	"bearer_token":    {"bearer"},
+}
+
+func mayMatch(low string, hints []string) bool {
+	if len(hints) == 0 {
+		return true
+	}
+	for _, h := range hints {
+		if strings.Contains(low, h) {
+			return true
+		}
+	}
+	return false
 }
 
 var rules []rule
 
 func add(name, pattern string) {
-	rules = append(rules, rule{name: name, re: regexp.MustCompile(pattern)})
+	rules = append(rules, rule{name: name, re: regexp.MustCompile(pattern), hints: hintsByRule[name]})
+}
+
+func addKeep(name, pattern, repl string, guard func([]string) bool) {
+	rules = append(rules, rule{name: name, re: regexp.MustCompile(pattern), repl: repl, guard: guard, hints: hintsByRule[name]})
+}
+
+// counterKey reports key names that carry a count or a setting, not a
+// credential ("max_tokens", "tokens_in", "token_count", "password_policy");
+// they must stay readable in the trail.
+var counterKey = regexp.MustCompile(`(?i)(?:tokens|(?:max|min|num|total|input|output|prompt|completion|cached|reasoning)[_.-]?tokens?|token[_.-]?(?:count|limit|usage|budget|used|type|ttl|expiry|expires)|(?:password|passwd|pwd|secret)[_.-]?(?:policy|strategy|rotation|length|min|max|file|path|name|manager|store|ref|type|age))$`)
+
+func notCounter(sub []string) bool {
+	return len(sub) < 2 || !counterKey.MatchString(sub[1])
 }
 
 func init() {
-	// AWS access key IDs.
-	add("aws_access_key", `AKIA[0-9A-Z]{16}`)
-	// GitHub tokens.
+	// --- Vendor token formats (whole token masked). Order matters: the more
+	// specific prefixes run before generic ones.
+	add("aws_access_key", `\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|AKIA[0-9A-Z]{16}`)
 	add("github_token", `gh[pousr]_[A-Za-z0-9]{20,}`)
 	add("github_pat", `github_pat_[A-Za-z0-9_]{20,}`)
-	// Slack tokens.
+	add("gitlab_token", `gl(?:pat|dt|rt|ptt|cbt|soat|ft|imt|agent|oas)-[A-Za-z0-9_-]{20,}`)
 	add("slack_token", `xox[baprs]-[A-Za-z0-9-]{10,}`)
-	// Stripe keys.
+	add("slack_webhook", `https://hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9/_-]{20,}`)
+	add("discord_webhook", `https://(?:discord|discordapp)\.com/api/webhooks/\d+/[A-Za-z0-9_-]{20,}`)
 	add("stripe_key", `(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}`)
-	// OpenAI-style keys.
-	add("openai_key", `sk-[A-Za-z0-9]{20,}`)
-	// Google API keys.
+	add("stripe_webhook_secret", `whsec_[A-Za-z0-9]{16,}`)
 	add("google_api_key", `AIza[0-9A-Za-z_-]{35}`)
-	// Anthropic keys.
-	add("anthropic_key", `sk-ant-[A-Za-z0-9-]{20,}`)
-	// Private key material (whole block value).
-	add("private_key", `-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----`)
-	// JWTs (header.payload — enough to be dangerous, redact the signature too).
+	add("google_oauth_token", `ya29\.[A-Za-z0-9_-]{20,}`)
+	add("anthropic_key", `sk-ant-[A-Za-z0-9_-]{20,}`)
+	// OpenAI-style keys, including sk-proj-/sk-svcacct- forms with - and _.
+	add("openai_key", `sk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`)
+	add("npm_token", `npm_[A-Za-z0-9]{30,}`)
+	add("huggingface_token", `hf_[A-Za-z0-9]{30,}`)
+	add("sendgrid_key", `SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}`)
+	add("shopify_token", `shp(?:at|ss|ca|pa)_[A-Fa-f0-9]{32}`)
+	add("digitalocean_token", `dop_v1_[a-f0-9]{64}`)
+	add("docker_pat", `dckr_pat_[A-Za-z0-9_-]{20,}`)
+	// Private key material. Also redacts a block cut off before its END line
+	// (a truncated argument), to the end of the text.
+	add("private_key", `-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|$)`)
+	// JWTs (header.payload.signature).
 	add("jwt", `eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`)
-	// Basic-auth credentials embedded in URLs.
-	add("url_credentials", `(?i)(https?://)[^:/\s@]+:[^@\s]+@`)
-	// JSON string values: {"api_key": "secret..."} — case-insensitive key match.
-	add("json_secret_value", `(?i)("(?:api[_-]?key|secret|password|passwd|pwd|token|auth[_-]?token|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|bearer)["']?\s*:\s*["']?)([^"',}\s]+)(["']?)`)
-	// Shell/env assignment: API_KEY=secret, --password hunter2, password: hunter2
-	add("kv_secret_value", `(?i)((?:api[_-]?key|secret|password|passwd|pwd|token|auth[_-]?token|access[_-]?token|client[_-]?secret)[=:]["']?)([^\s"'&;]+)`)
-	// Bearer tokens in headers.
-	add("bearer_token", `(?i)(bearer\s+)([A-Za-z0-9\-._~+/]+=*)\b`)
+
+	vendorRules = len(rules)
+
+	// --- Credentials embedded in text.
+	// user:password@ in any URL scheme (postgres, mysql, mongodb+srv, redis,
+	// amqp, ftp, https, ...). The user name is kept; the password is masked.
+	addKeep("url_credentials", `(?i)\b([a-z][a-z0-9+.-]{1,20}://[^:/\s@]*:)[^@\s/]+@`, "${1}[redacted]@", nil)
+	// Azure storage / SAS style secrets.
+	addKeep("azure_secret", `(?i)((?:AccountKey|SharedAccessKey|SharedAccessSignature|EndpointSuffix=[^;]*;?\s*SharedAccessKey)\s*=\s*)[^;\s"']+`, "${1}[redacted]", nil)
+	addKeep("sas_signature", `(?i)([?&]sig=)[A-Za-z0-9%+/=]{16,}`, "${1}[redacted]", nil)
+	// HTTP credential headers: Authorization (any scheme), API-key headers.
+	addKeep("auth_header", `(?i)(authorization["']?\s*[:=]\s*["']?(?:(?:basic|bearer|token|digest|negotiate|aws4-hmac-sha256)\s+)?)[^\s"',;]{8,}`, "${1}[redacted]", nil)
+	addKeep("api_key_header", `(?i)((?:x-api-key|x-auth-token|x-access-token|x-gitlab-token|x-github-token|private-token|api-key|apikey|ocp-apim-subscription-key)["']?\s*[:=]\s*["']?)[^\s"',;]+`, "${1}[redacted]", nil)
+	// JSON string values: {"api_key": "secret..."}.
+	addKeep("json_secret_value", `(?i)("(?:[A-Za-z0-9_.-]*(?:api[_-]?key|secret|password|passwd|pwd|token|credential|private[_-]?key|bearer))["']?\s*:\s*["']?)([^"',}\s]+)(["']?)`,
+		"${1}[redacted]${3}", func(sub []string) bool {
+			// sub[1] holds the quoted key here; strip to the name.
+			return notCounter([]string{"", strings.Trim(strings.SplitN(sub[1], ":", 2)[0], " \"'")})
+		})
+	// Command-line flags: --password hunter2, --token=abc, --api-key abc.
+	addKeep("cli_secret_flag", `(?i)(--?(?:password|passwd|pwd|token|api[_-]?key|apikey|secret|client[_-]?secret|auth[_-]?token|access[_-]?token|bearer|credential)(?:=|\s+)["']?)([^\s"'-][^\s"']*)`, "${1}[redacted]", nil)
+	// mysql-family -pSECRET (no space).
+	addKeep("mysql_password", `(\b(?:mysql|mysqldump|mysqladmin|mariadb)\b[^\n|;&]*?\s-p)([^\s-][^\s]*)`, "${1}[redacted]", nil)
+	// Assignments: API_KEY=..., DB_PASSWORD = "a b", AWS_SECRET_ACCESS_KEY: ...
+	addKeep("kv_secret_value",
+		`(?i)\b([A-Za-z0-9_.-]*(?:api[_-]?key|apikey|secret|passw(?:or)?d|passwd|pwd|token|credential|private[_-]?key|auth[_-]?key|access[_-]?key|signing[_-]?key)[A-Za-z0-9_.-]*)(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"'&;,)}\]]+)`,
+		"${1}${2}[redacted]", notCounter)
+	// Bearer tokens anywhere.
+	addKeep("bearer_token", `(?i)(bearer\s+)([A-Za-z0-9\-._~+/]+=*)`, "${1}[redacted]", nil)
+}
+
+// invisible reports characters that must not survive into an audit trail:
+// zero-width and bidirectional controls (used to hide or reorder text), and
+// control bytes including ESC (terminal escape sequences). \t \n \r are kept.
+func invisible(r rune) bool {
+	switch {
+	case r == '\t' || r == '\n' || r == '\r':
+		return false
+	case r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0):
+		return true
+	case r == 0x00ad || r == 0x061c || r == 0x180e:
+		return true
+	case r >= 0x200b && r <= 0x200f, r >= 0x202a && r <= 0x202e, r >= 0x2060 && r <= 0x206f, r == 0xfeff:
+		return true
+	}
+	return false
+}
+
+// Sanitize removes zero-width, bidi and terminal-control characters. The
+// redactor runs it first so a secret split by an invisible character is still
+// found, and so stored text cannot spoof or reorder what a reviewer reads.
+func Sanitize(s string) string {
+	clean := true
+	for _, r := range s {
+		if invisible(r) {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if invisible(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+var b64Candidate = regexp.MustCompile(`[A-Za-z0-9+/]{24,}={0,2}`)
+
+// vendorRules is the number of leading rules that match self-identifying
+// token formats; encoded copies are tested against these only.
+var vendorRules int
+
+func encodedSecrets(s string) string {
+	if len(s) > 1<<20 {
+		return s
+	}
+	n := 0
+	return b64Candidate.ReplaceAllStringFunc(s, func(m string) string {
+		if n++; n > 64 || len(m) > 8192 {
+			return m
+		}
+		t := strings.TrimRight(m, "=")
+		for _, enc := range []*base64.Encoding{base64.RawStdEncoding} {
+			b, err := enc.DecodeString(t)
+			if err != nil || len(b) < 16 {
+				continue
+			}
+			ds := string(b)
+			for _, r := range rules[:vendorRules] {
+				if r.re.MatchString(ds) {
+					return "[redacted:encoded_secret]"
+				}
+			}
+		}
+		return m
+	})
 }
 
 // RedactString redacts secrets from s. It returns the redacted string and
 // whether any redaction happened. Redactions are stable and deterministic:
 // the same secret always maps to the same placeholder, so arg hashes computed
-// over redacted text stay consistent.
+// over redacted text stay consistent. Invisible/bidi/control characters are
+// stripped (see Sanitize); stripping alone does not count as a redaction hit.
 func RedactString(s string) (string, bool) {
-	out := s
+	out := Sanitize(s)
 	hit := false
+	low := strings.ToLower(out)
 	for _, r := range rules {
+		r := r
+		if !mayMatch(low, r.hints) {
+			continue
+		}
 		out = r.re.ReplaceAllStringFunc(out, func(m string) string {
-			hit = true
-			// Preserve capture-group structure for the kv/json rules so the
-			// key name stays visible and only the value is masked.
-			sub := r.re.FindStringSubmatch(m)
-			switch r.name {
-			case "json_secret_value", "kv_secret_value", "bearer_token", "url_credentials":
-				if len(sub) == 4 {
-					return sub[1] + "[redacted]" + sub[3]
-				}
-				if len(sub) == 3 {
-					return sub[1] + "[redacted]"
-				}
+			if r.repl == "" {
+				hit = true
+				return "[redacted:" + r.name + "]"
 			}
-			return "[redacted:" + r.name + "]"
+			if strings.Contains(m, "[redacted") {
+				return m // already masked: keeps redaction idempotent
+			}
+			sub := r.re.FindStringSubmatch(m)
+			if sub == nil || (r.guard != nil && !r.guard(sub)) {
+				return m
+			}
+			hit = true
+			return r.re.ReplaceAllString(m, r.repl)
 		})
+	}
+	if enc := encodedSecrets(out); enc != out {
+		out, hit = enc, true
 	}
 	return out, hit
 }
@@ -145,7 +308,22 @@ var credentialBasePatterns = []string{
 	".env*", "*.env", "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*",
 	"*credentials*", ".npmrc", ".pypirc", ".netrc", "_netrc",
 	"kubeconfig", "config.json", ".git-credentials",
+	".pgpass", ".my.cnf", ".vault-token", ".s3cfg", ".boto", ".dockercfg", ".htpasswd", ".rclone.conf",
+	"*.kdbx", "*.keychain", "*.keychain-db", "shadow", "gshadow", "master.key", "wallet.dat",
+	"terraform.tfstate*", "*.tfvars", "service-account*.json", "login data", "cookies.sqlite", "key4.db", "logins.json",
 }
+
+// credentialSubpaths are path fragments (lower-case, forward slashes) that
+// mark credential stores whose file names are too generic to match alone.
+var credentialSubpaths = []string{
+	"/.config/gh/", "/.config/op/", "/.config/rclone", "/.cargo/credentials", "/.m2/settings", "/.gem/credentials",
+	"/.password-store", "/library/keychains", "/.mozilla/", "/.config/google-chrome/", "/.config/chromium/",
+	"/library/application support/google/chrome", "/.terraform.d/", "/.local/share/keyrings", "/.config/1password",
+	"/.ethereum/keystore", "/.bitcoin/", "/etc/sudoers", "/appdata/roaming/microsoft/credentials",
+}
+
+// procEnviron matches /proc/<pid|self>/environ, which holds a process's secrets.
+var procEnviron = regexp.MustCompile(`/proc/[^/]+/(?:environ|mem|maps)$`)
 
 // CredentialDirs are directory names whose whole subtree is
 // credential-adjacent. Matched as a path component, with or without a
@@ -153,6 +331,15 @@ var credentialBasePatterns = []string{
 var CredentialDirs = []string{".ssh", ".aws", ".gnupg", ".docker", ".kube", "gcloud", ".warden", ".azure"}
 
 func credentialAdjacentOne(path string) bool {
+	norm := strings.ToLower(strings.ReplaceAll(path, `\`, "/"))
+	if procEnviron.MatchString(norm) {
+		return true
+	}
+	for _, sub := range credentialSubpaths {
+		if strings.Contains(norm, sub) || strings.HasPrefix(norm, sub[1:]) {
+			return true
+		}
+	}
 	base := strings.ToLower(filepath.Base(path))
 	for _, p := range credentialBasePatterns {
 		if globMatch(p, base) {

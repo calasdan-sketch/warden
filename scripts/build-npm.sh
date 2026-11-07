@@ -21,7 +21,7 @@ if [[ "$VERSION" != "$GOVERSION_IN_SRC" ]]; then
   echo "version mismatch: npm/warden/package.json=$VERSION cmd/warden/main.go=$GOVERSION_IN_SRC" >&2
   exit 1
 fi
-PLATFORMS="${PLATFORMS:-linux-x64 linux-arm64 darwin-x64 darwin-arm64}"
+PLATFORMS="${PLATFORMS:-linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64 win32-arm64}"
 DIST=npm/dist
 rm -rf "$DIST"
 mkdir -p "$DIST"
@@ -30,11 +30,13 @@ goarch() { case "$1" in x64) echo amd64 ;; arm64) echo arm64 ;; *) echo "bad cpu
 
 for p in $PLATFORMS; do
   os="${p%-*}"; cpu="${p#*-}"
+  goos="$os"; exe="warden"
+  if [[ "$os" == "win32" ]]; then goos=windows; exe="warden.exe"; fi
   dir="$DIST/warden-$p"
   mkdir -p "$dir/bin"
   echo "building $p…"
-  CGO_ENABLED=0 GOOS="$os" GOARCH="$(goarch "$cpu")" \
-    go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$dir/bin/warden" ./cmd/warden
+  CGO_ENABLED=0 GOOS="$goos" GOARCH="$(goarch "$cpu")" \
+    go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$dir/bin/$exe" ./cmd/warden
   cat > "$dir/package.json" <<JSON
 {
   "name": "@decnutz/warden-$p",
@@ -44,7 +46,7 @@ for p in $PLATFORMS; do
   "repository": { "type": "git", "url": "git+https://github.com/calasdan-sketch/warden.git" },
   "os": ["$os"],
   "cpu": ["$cpu"],
-  "files": ["bin/warden"],
+  "files": ["bin/$exe"],
   "preferUnplugged": true
 }
 JSON

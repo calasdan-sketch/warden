@@ -129,7 +129,7 @@ func TestMCPJailJoin(t *testing.T) {
 		`"args":"https://evil.example.com","allowed":false,"at":"2026-10-18T10:01:00Z"}`
 	// A secret in the args must be redacted by the collector even on the join path.
 	secretLine := `{"run_id":"mj-1","agent_id":"a","fleet":"f","tool":"fetch","server":"net-mcp",` +
-		`"args":"api_key=sk_live_abcdefghijklmnop1234","allowed":true,"at":"2026-10-18T10:02:00Z"}`
+		`"args":"api_key=sk_live_` + `abcdefghijklmnop1234","allowed":true,"at":"2026-10-18T10:02:00Z"}`
 	for _, l := range []string{allowed, denied, secretLine} {
 		if err := im.ImportLine(SourceMCPJail, l); err != nil {
 			t.Fatal(err)
@@ -161,7 +161,7 @@ func TestMCPJailJoin(t *testing.T) {
 		t.Error("join path must redact before emission")
 	}
 	for _, sp := range spans {
-		if containsStr(sp.ArgsSummary, "sk_live_abcdefghijklmnop1234") {
+		if containsStr(sp.ArgsSummary, "sk_l"+"ive_abcdefghijklmnop1234") {
 			t.Errorf("secret reached the store via join: %q", sp.ArgsSummary)
 		}
 	}

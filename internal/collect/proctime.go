@@ -2,11 +2,11 @@ package collect
 
 import (
 	"fmt"
+	"github.com/calasdan-sketch/warden/internal/procgrp"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 // procStartTimeNs returns the process start time as Unix nanoseconds, or 0
@@ -71,7 +71,7 @@ func pidAliveForRun(dataDir, runID string) bool {
 	if err != nil || pf.PID <= 0 {
 		return false
 	}
-	if err := syscall.Kill(pf.PID, 0); err != nil {
+	if !procgrp.PidAlive(pf.PID) {
 		return false
 	}
 	if pf.StartedAtNs != 0 {

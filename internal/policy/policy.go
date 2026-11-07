@@ -229,12 +229,30 @@ func (e *Evaluator) evalTool(sp *model.Span, ver string) Result {
 	// 3. Shell deny patterns: deny always wins, even over explicit approvals.
 	if shellTools[tool] {
 		cmd := shellCommand(sp)
+		if len(cmd) > MaxAnalyzedCommand {
+			// Fail closed: analysis time grows with length, and a command this
+			// large is not something a human can review in an approval prompt.
+			return Result{Decision: Deny, DefaultDeny: true, Version: ver,
+				Reason: fmt.Sprintf("shell command is %d bytes; commands over %d bytes are not analyzed and are refused", len(cmd), MaxAnalyzedCommand)}
+		}
 		if reason := e.shellExplicitDeny(cmd); reason != "" {
 			return Result{Decision: Deny, Reason: reason, Version: ver}
 		}
 		if p := e.protectedPathInCommand(cmd); p != "" {
 			return Result{Decision: Deny,
 				Reason:  fmt.Sprintf("command references warden/harness control file %q: denied (an agent must not touch its own supervisor)", p),
+				Version: ver}
+		}
+		// Writes to startup files, system paths, hooks and raw devices:
+		// persistence and damage, whatever binary does the writing.
+		if t, why, hard, found := sensitiveWriteInCommand(cmd); found {
+			if hard || e.policy.Files.CredentialAdjacent == "deny" {
+				return Result{Decision: Deny,
+					Reason:  fmt.Sprintf("command %s (%q): denied", why, t),
+					Version: ver}
+			}
+			return Result{Decision: RequireApproval,
+				Reason:  fmt.Sprintf("command %s (%q): requires human approval", why, t),
 				Version: ver}
 		}
 		// Commands that touch credential-adjacent paths get the same
@@ -265,6 +283,9 @@ func (e *Evaluator) evalTool(sp *model.Span, ver string) Result {
 	}
 	return Result{Decision: Allow, Version: ver}
 }
+
+// MaxAnalyzedCommand is the longest shell command the policy will analyze.
+const MaxAnalyzedCommand = 256 << 10
 
 // shellCommand returns the command text a shell span carries.
 func shellCommand(sp *model.Span) string {
@@ -467,7 +488,16 @@ func (e *Evaluator) evalShellAllow(sp *model.Span, ver string) Result {
 		if ci.Reject != "" {
 			return deny("shell command %q: %s (policy default is deny)", truncate(cmd, 80), ci.Reject)
 		}
-		if ci.Bin == "" || safeBuiltins[ci.Bin] {
+		if ci.EnvDump {
+			return deny("shell command %q: dumps the whole environment (it can hold secrets) (policy default is deny)", truncate(cmd, 80))
+		}
+		if ci.Bin == "" {
+			continue
+		}
+		if safeBuiltins[ci.Bin] {
+			if why := e.riskyExtra(ci); why != "" {
+				return deny("shell command %q: %s (policy default is deny)", truncate(cmd, 80), why)
+			}
 			continue
 		}
 		if !e.binaryAllowed(ci) {
@@ -476,7 +506,11 @@ func (e *Evaluator) evalShellAllow(sp *model.Span, ver string) Result {
 			}
 			return deny("shell command %q not allowlisted (binary %q; policy default is deny)", truncate(cmd, 80), ci.Bin)
 		}
-		if why := riskyInvocation(ci); why != "" {
+		why := riskyInvocation(ci)
+		if why == "" {
+			why = e.riskyExtra(ci)
+		}
+		if why != "" {
 			return deny("shell command %q: %s (policy default is deny)", truncate(cmd, 80), why)
 		}
 	}
@@ -549,10 +583,11 @@ func riskyInvocation(ci CommandInfo) string {
 
 // CommandInfo is one simple command, parsed.
 type CommandInfo struct {
-	Bin    string   // lower-cased base name of the program ("" when none)
-	Path   string   // the program as written ("./git", "/usr/bin/git", "git")
-	Args   []string // arguments after the program
-	Reject string   // non-empty: the command must not be allowed (why)
+	Bin     string   // lower-cased base name of the program ("" when none)
+	Path    string   // the program as written ("./git", "/usr/bin/git", "git")
+	Args    []string // arguments after the program
+	Reject  string   // non-empty: the command must not be allowed (why)
+	EnvDump bool     // "env" with no command: prints the environment
 }
 
 // dangerousEnv reports environment variables that change which code a
@@ -604,6 +639,7 @@ func ParseCommand(seg string) CommandInfo {
 	toks := shellFields(seg)
 	var ci CommandInfo
 	i := 0
+	sawEnv := false
 	checkAssign := func(t string) bool {
 		name, ok := isAssignment(t)
 		if ok && dangerousEnv(name) && ci.Reject == "" {
@@ -622,6 +658,7 @@ func ParseCommand(seg string) CommandInfo {
 			i++
 			continue
 		case lt == "env":
+			sawEnv = true
 			i++
 			for i < len(toks) && strings.HasPrefix(toks[i], "-") {
 				f := toks[i]
@@ -689,6 +726,7 @@ func ParseCommand(seg string) CommandInfo {
 		break
 	}
 	if i >= len(toks) {
+		ci.EnvDump = sawEnv
 		return ci
 	}
 	ci.Path = toks[i]

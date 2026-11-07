@@ -2,7 +2,9 @@ package receipt
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -149,5 +151,50 @@ func TestKeyIDStable(t *testing.T) {
 	}
 	if len(s.KeyID()) != 16 {
 		t.Errorf("KeyID length = %d, want 16", len(s.KeyID()))
+	}
+}
+
+// Many processes starting on a fresh data dir must all end up with the same
+// signing key (a second key overwriting the first would make earlier receipts
+// unverifiable).
+func TestLoadOrCreateConcurrentSameKey(t *testing.T) {
+	for round := 0; round < 20; round++ {
+		dir := filepath.Join(t.TempDir(), "d")
+		var wg sync.WaitGroup
+		ids := make(chan string, 16)
+		errs := make(chan error, 16)
+		for i := 0; i < 16; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				s, err := LoadOrCreate(dir)
+				if err != nil {
+					errs <- err
+					return
+				}
+				ids <- s.KeyID()
+			}()
+		}
+		wg.Wait()
+		close(ids)
+		close(errs)
+		for err := range errs {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		first := ""
+		for id := range ids {
+			if first == "" {
+				first = id
+			} else if id != first {
+				t.Fatalf("round %d: two different keys installed: %s vs %s", round, first, id)
+			}
+		}
+		again, err := LoadOrCreate(dir)
+		if err != nil || again.KeyID() != first {
+			t.Fatalf("reload differs: %v", err)
+		}
+		if entries, _ := os.ReadDir(dir); len(entries) != 2 {
+			t.Fatalf("leftover temp files: %v", entries)
+		}
 	}
 }
