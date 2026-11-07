@@ -84,9 +84,10 @@ func (s *Session) Step(w io.Writer, n int) error {
 	if st.WhatIf != nil && st.WhatIf.Skipped == "" {
 		fmt.Fprintf(w, "what-if:   %s %s\n", verdictLabel[st.WhatIf.Decision], st.WhatIf.Reason)
 	}
-	fmt.Fprintf(w, "\nstate after this step\n  tool calls %d, denied %d, asked %d\n  tokens in/out %d/%d, cost $%.4f\n", st.State.ToolCalls, st.State.Denied, st.State.Asked, st.State.TokensIn, st.State.TokensOut, st.State.CostUSD)
-	fmt.Fprintf(w, "  tools used: %s\n  files touched (%d): %s\n  hosts contacted (%d): %s\n",
-		strings.Join(st.State.Tools, ", "), len(st.State.Files), strings.Join(st.State.Files, ", "), len(st.State.Hosts), strings.Join(st.State.Hosts, ", "))
+	state := s.StateAt(n)
+	fmt.Fprintf(w, "\nstate after this step\n  tool calls %d, denied %d, asked %d\n  tokens in/out %d/%d, cost $%.4f\n", state.ToolCalls, state.Denied, state.Asked, state.TokensIn, state.TokensOut, state.CostUSD)
+	fmt.Fprintf(w, "  tools used (%d): %s\n  files touched (%d): %s\n  hosts contacted (%d): %s\n",
+		state.ToolsN, strings.Join(state.Tools, ", "), state.FilesN, strings.Join(state.Files, ", "), state.HostsN, strings.Join(state.Hosts, ", "))
 	fmt.Fprintln(w, "\ncontext")
 	for i := n - 4; i <= n; i++ {
 		if i < 0 || i >= len(s.Steps) {
@@ -164,9 +165,24 @@ document.getElementById('sub').textContent='agent '+R.agent_id+' / fleet '+R.fle
 var ib=document.getElementById('integ');ib.textContent='integrity: '+S.integrity.status.toUpperCase();ib.title=S.integrity.detail;
 ib.style.color=S.integrity.status==='verified'?'var(--ok)':'var(--deny)';
 function vis(){return S.steps.filter(function(s){return !gated||(s.verdict!=='allow'&&s.verdict!=='ok')||(s.what_if&&s.what_if.changed)})}
+var WIN=400;
+function lists(n){
+ var st=S.steps[n].state;
+ if(st.files_touched||(st.files_count+st.hosts_count+st.tools_count===0))return st;
+ var f={},h={},t={};
+ for(var i=0;i<=n;i++){var x=S.steps[i].span;
+  if(x.kind==='tool.call'&&x.tool)t[x.tool]=1;
+  if(x.kind==='file.op'&&x.path)f[x.path]=1;
+  if(x.kind==='net.egress'&&x.host)h[x.host]=1}
+ function top(m,c){var k=Object.keys(m).sort();var r=k.slice(0,50);if(k.length>50)r.push('… +'+(k.length-50)+' more');return r}
+ var o={};for(var k in st)o[k]=st[k];
+ o.files_touched=top(f);o.hosts_contacted=top(h);o.tools_used=top(t);return o}
 function draw(){
  var L=document.getElementById('list');L.textContent='';
- vis().forEach(function(s){
+ var all=vis(),ci=0;for(var q=0;q<all.length;q++){if(all[q].n-1===cur){ci=q;break}}
+ var lo=Math.max(0,ci-WIN/4),hi=Math.min(all.length,lo+WIN);
+ if(lo>0){L.appendChild(el('div','mut','… '+lo+' earlier steps (use k / g to move)'))}
+ all.slice(lo,hi).forEach(function(s){
   var r=el('div','row'+(s.n-1===cur?' sel':''));
   r.appendChild(el('span','mut',String(s.n)));
   r.appendChild(el('span','mut','+'+(s.offset_ms/1000).toFixed(1)+'s'));
@@ -174,6 +190,7 @@ function draw(){
   r.appendChild(el('span','',s.what));
   r.appendChild(el('span','v-'+s.verdict,s.verdict.toUpperCase()));
   r.onclick=function(){cur=s.n-1;draw()};L.appendChild(r)});
+ if(hi<all.length){L.appendChild(el('div','mut','… '+(all.length-hi)+' later steps (use j / G to move)'))}
  var s=S.steps[cur];var D=document.getElementById('detail');D.textContent='';
  if(!s){D.textContent='no steps';return}
  D.appendChild(el('h2','', 'step '+s.n+' of '+S.steps.length));
@@ -182,7 +199,7 @@ function draw(){
  if(s.span.policy_decision)lines.push('policy: '+s.span.policy_decision+' '+(s.span.policy_reason||''));
  if(s.span.late_after_seal)lines.push('WARNING: recorded after seal, not covered by the signature');
  if(s.what_if&&!s.what_if.skipped)lines.push('what-if: '+s.what_if.decision+(s.what_if.changed?'  (CHANGES)':'')+' '+(s.what_if.reason||''));
- var st=s.state;lines.push('','after this step:','  calls '+st.tool_calls+', denied '+st.denied+', asked '+st.asked,'  tokens '+st.tokens_in+'/'+st.tokens_out+', cost $'+st.cost_usd.toFixed(4),'  tools: '+(st.tools_used||[]).join(', '),'  files ('+(st.files_touched||[]).length+'): '+(st.files_touched||[]).join(', '),'  hosts ('+(st.hosts_contacted||[]).length+'): '+(st.hosts_contacted||[]).join(', '));
+ var st=lists(cur);lines.push('','after this step:','  calls '+st.tool_calls+', denied '+st.denied+', asked '+st.asked,'  tokens '+st.tokens_in+'/'+st.tokens_out+', cost $'+st.cost_usd.toFixed(4),'  tools: '+(st.tools_used||[]).join(', '),'  files ('+(st.files_count||0)+'): '+(st.files_touched||[]).join(', '),'  hosts ('+(st.hosts_count||0)+'): '+(st.hosts_contacted||[]).join(', '));
  p.textContent=lines.join('\n');D.appendChild(p);
 }
 function move(d){var v=vis();if(!v.length)return;var i=0;for(var k=0;k<v.length;k++){if(v[k].n-1===cur)i=k}

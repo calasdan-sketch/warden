@@ -82,7 +82,7 @@ func (a *app) cmdVerify(args []string) int {
 			fmt.Fprintln(os.Stderr, "verify:", err)
 			return 1
 		}
-		items = append(items, audit.Item{Receipt: rec, Body: body, Spans: spans})
+		items = append(items, audit.Item{Receipt: rec, Body: body, Spans: spans, Run: a.runRow(*runID)})
 	} else {
 		all, err := a.st.AllReceipts()
 		if err != nil {
@@ -95,7 +95,7 @@ func (a *app) cmdVerify(args []string) int {
 				fmt.Fprintln(os.Stderr, "verify:", err)
 				return 1
 			}
-			items = append(items, audit.Item{Receipt: sr.Receipt, Body: sr.Body, Spans: spans})
+			items = append(items, audit.Item{Receipt: sr.Receipt, Body: sr.Body, Spans: spans, Run: a.runRow(sr.Receipt.RunID)})
 		}
 	}
 	rep := audit.Verify(items, pub)
@@ -245,6 +245,9 @@ func printReport(rep *audit.Report) int {
 	if rep.LegacyNoTrc > 0 {
 		fmt.Printf("note: %d receipt(s) predate trace digests: their totals are signed, their individual spans are not\n", rep.LegacyNoTrc)
 	}
+	for _, n := range rep.Notes {
+		fmt.Println("note:", n)
+	}
 	for _, u := range rep.Unsigned {
 		fmt.Println("UNSIGNED", u)
 	}
@@ -299,4 +302,15 @@ func (a *app) cmdAnchor(args []string) int {
 	}
 	fmt.Printf("anchored %d receipts (head %.12s) to %s\n", an.ReceiptCount, head, *out)
 	return 0
+}
+
+// runRow returns the live run record for a sealed run, or nil when it is
+// gone. A missing row is itself odd, but the receipt and the chain are the
+// evidence; the row is only compared when it exists.
+func (a *app) runRow(runID string) *model.Run {
+	r, err := a.st.GetRun(runID)
+	if err != nil {
+		return nil
+	}
+	return r
 }

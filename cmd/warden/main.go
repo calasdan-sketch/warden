@@ -35,6 +35,9 @@ import (
 // version is overridden at release build time: -ldflags "-X main.version=..."
 var version = "0.2.0"
 
+// gatingCommands are the commands that enforce policy and so need a valid one.
+var gatingCommands = map[string]bool{"wrap": true, "gate": true, "dashboard": true, "serve": true, "report": true, "span": true}
+
 // app holds the wired dependencies for CLI commands.
 type app struct {
 	dataDir string
@@ -60,7 +63,14 @@ func dataDir() string {
 
 // openApp wires everything. Commands that only read still get the full app;
 // it's cheap and keeps behavior consistent.
-func openApp(dir, policyPath string) (*app, error) {
+//
+// A policy file that does not parse stops every command that GATES (wrap,
+// gate, dashboard, report, span): they must never run on a policy nobody
+// reviewed. Commands that only read, verify or stop things (kill, verify,
+// runs, replay, export, anchor, approve) carry on with the built-in default
+// and say so, because an operator must be able to use the kill switch and
+// check the audit trail while the policy file is broken.
+func openApp(dir, policyPath string, needsPolicy bool) (*app, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -74,8 +84,12 @@ func openApp(dir, policyPath string) (*app, error) {
 	}
 	pol, err = policy.Load(policyPath)
 	if err != nil {
-		st.Close()
-		return nil, err
+		if needsPolicy {
+			st.Close()
+			return nil, fmt.Errorf("policy %s: %w (fix it, or check it with: warden policy check)", policyPath, err)
+		}
+		fmt.Fprintf(os.Stderr, "warden: warning: policy %s is invalid (%v); this command does not use it, continuing with the built-in default\n", policyPath, err)
+		pol, _ = policy.Default()
 	}
 	// Agents must never touch their supervisor's own state.
 	pol.Protect(dir, policyPath)
@@ -145,6 +159,16 @@ func main() {
 		os.Exit(cmdDemo(rest))
 	case "bench":
 		os.Exit(cmdBench(rest))
+	case "doctor":
+		os.Exit(cmdDoctor(policyPath, dir, rest))
+	case "policy":
+		// check and explain only read the policy file; suggest needs the store.
+		if len(rest) > 0 && (rest[0] == "check" || rest[0] == "explain") {
+			os.Exit(cmdPolicyOffline(policyPath, dir, rest))
+		}
+		if len(rest) == 0 {
+			os.Exit(cmdPolicyOffline(policyPath, dir, rest))
+		}
 	case "replay":
 		// Replaying an export is for auditors too: no data dir needed.
 		for _, x := range rest {
@@ -167,7 +191,7 @@ func main() {
 		os.Exit(runHookFailClosed(dir, policyPath, rest))
 	}
 
-	a, err := openApp(dir, policyPath)
+	a, err := openApp(dir, policyPath, gatingCommands[cmd])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "warden:", err)
 		os.Exit(1)
@@ -206,6 +230,14 @@ func main() {
 		code = a.cmdRuns(rest)
 	case "replay":
 		code = a.cmdReplay(rest)
+	case "summary":
+		code = a.cmdSummary(rest)
+	case "policy":
+		if rest[0] == "suggest" {
+			code = a.cmdPolicySuggest(rest[1:])
+		} else {
+			code = cmdPolicyOffline(policyPath, dir, rest)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", cmd)
 		usage()
@@ -235,6 +267,11 @@ Usage: warden [--dir DIR] [--policy FILE] <command> [flags]
   export                  Audit trail: --format jsonl (verifiable bundle) | otlp [--endpoint URL]
   anchor [--out FILE]     Emit a signed chain-head anchor; ship it off the machine
                           (verify --anchors FILE then proves history was not rewritten)
+  policy check|explain|suggest
+                          Validate policy.yaml (typos are errors), see why a command is allowed or
+                          stopped, and get allowlist suggestions from what was stopped
+  summary [--since 24h]   Plain digest of a window: runs, what was stopped and why, hosts, kills
+  doctor                  Check this install: key, policy, audit trail, hooks. Creates nothing.
   runs                    List recent runs (find the id to replay)
   replay <run|last>       Step through a recorded run: timeline, state at any step (--step N),
                           what-if under a candidate policy (--what-if FILE), --html FILE, --json

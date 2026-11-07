@@ -318,8 +318,22 @@ var credentialBasePatterns = []string{
 var credentialSubpaths = []string{
 	"/.config/gh/", "/.config/op/", "/.config/rclone", "/.cargo/credentials", "/.m2/settings", "/.gem/credentials",
 	"/.password-store", "/library/keychains", "/.mozilla/", "/.config/google-chrome/", "/.config/chromium/",
-	"/library/application support/google/chrome", "/.terraform.d/", "/.local/share/keyrings", "/.config/1password",
+	"/library/application support/google/chrome", "/.terraform.d/", "/.local/share/keyrings", "/.config/1password", "/.codex/auth", "/.claude/.credentials", "/.config/claude/", "/.bash_history", "/.zsh_history", "/.python_history", "/.psql_history", "/.mysql_history", "/.node_repl_history", "/.config/fish/fish_history",
 	"/.ethereum/keystore", "/.bitcoin/", "/etc/sudoers", "/appdata/roaming/microsoft/credentials",
+}
+
+// CredentialSubpathIn reports a credential-store path fragment found anywhere
+// in free text (a shell command), tolerant of quotes and escaped spaces, so
+// "Application\ Support/Google/Chrome" and "Application Support" both match.
+func CredentialSubpathIn(text string) (string, bool) {
+	n := strings.ToLower(text)
+	n = strings.NewReplacer(`\ `, " ", `\`, "/", `"`, "", `'`, "").Replace(n)
+	for _, sub := range credentialSubpaths {
+		if strings.Contains(n, sub) {
+			return strings.TrimPrefix(sub, "/"), true
+		}
+	}
+	return "", false
 }
 
 // procEnviron matches /proc/<pid|self>/environ, which holds a process's secrets.

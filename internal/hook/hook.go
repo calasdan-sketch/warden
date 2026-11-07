@@ -28,6 +28,7 @@ import (
 
 	"github.com/calasdan-sketch/warden/internal/model"
 	"github.com/calasdan-sketch/warden/internal/policy"
+	"github.com/calasdan-sketch/warden/internal/redact"
 )
 
 // Harness identifiers.
@@ -126,6 +127,16 @@ func toSpan(in *Input) *model.Span {
 	switch lname {
 	case "read", "write", "edit", "multiedit", "notebookedit", "notebookread", "glob", "grep", "ls":
 		p := firstString(ti, "file_path", "notebook_path", "path")
+		// Glob's "pattern" and Grep's "glob" can name a credential store
+		// directly ("/home/u/.aws/*", "**/.env") while "path" stays harmless.
+		if lname == "glob" || lname == "grep" {
+			for _, cand := range []string{firstString(ti, "pattern"), firstString(ti, "glob")} {
+				if cand != "" && (lname == "glob" || cand == firstString(ti, "glob")) && redact.IsCredentialAdjacentPath(cand) && !redact.IsCredentialAdjacentPath(p) {
+					p = dropBareWildcards(cand)
+					break
+				}
+			}
+		}
 		if p != "" {
 			op := "read"
 			if writeTools[lname] {
@@ -171,6 +182,25 @@ func ShellQuote(s string) string {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// dropBareWildcards removes path components made only of wildcards
+// ("/home/u/.aws/*" -> "/home/u/.aws", "**/.env" -> ".env"), so a search
+// pattern is judged by the names it spells out and not by every name a bare
+// "*" could stand for.
+func dropBareWildcards(p string) string {
+	parts := strings.Split(p, "/")
+	out := parts[:0]
+	for i, c := range parts {
+		if c != "" && strings.Trim(c, "*?") == "" {
+			continue
+		}
+		if c == "" && i != 0 {
+			continue
+		}
+		out = append(out, c)
+	}
+	return strings.Join(out, "/")
 }
 
 func firstString(m map[string]any, keys ...string) string {

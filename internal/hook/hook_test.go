@@ -136,3 +136,34 @@ func TestApplyPatchMapsToFileWrites(t *testing.T) {
 		t.Fatalf("paths: %v", got)
 	}
 }
+
+// Round 3: tools that read files without being the Read tool. An MCP
+// filesystem server and the search tools' pattern/glob fields used to carry
+// credential and control-file paths straight past the policy.
+func TestPolicyJudgesPathsInMCPAndSearchArguments(t *testing.T) {
+	p, _ := policy.Default()
+	p.Protect("/home/u/.warden")
+	ev := policy.NewEvaluator(p, nil)
+	cases := []struct {
+		name, tool, input string
+		want              policy.Decision
+	}{
+		{"mcp read of ssh key", "mcp__filesystem__read_file", `{"path":"/home/u/.ssh/id_rsa"}`, policy.RequireApproval},
+		{"mcp write of warden policy", "mcp__filesystem__write_file", `{"path":"/home/u/.warden/policy.yaml","content":"x"}`, policy.Deny},
+		{"mcp macOS browser store", "mcp__fs__read", `{"path":"/Users/u/Library/Application Support/Google/Chrome/Default/Login Data"}`, policy.RequireApproval},
+		{"mcp ordinary path", "mcp__filesystem__read_file", `{"path":"/home/u/proj/main.go"}`, policy.Allow},
+		{"mcp word 'credentials' in prose", "mcp__github__create_issue", `{"title":"rotate credentials and secret keys"}`, policy.Allow},
+		{"glob pattern names aws dir", "Glob", `{"pattern":"/home/u/.aws/*"}`, policy.RequireApproval},
+		{"grep glob names env files", "Grep", `{"pattern":"x","glob":"**/.env"}`, policy.RequireApproval},
+		{"grep over home", "Grep", `{"pattern":"AKIA","path":"/home/u"}`, policy.RequireApproval},
+		{"grep over tilde", "Grep", `{"pattern":"AKIA","path":"~"}`, policy.RequireApproval},
+		{"grep in project", "Grep", `{"pattern":"TODO","path":"/home/u/proj"}`, policy.Allow},
+		{"glob go files", "Glob", `{"pattern":"**/*.go"}`, policy.Allow},
+	}
+	for _, c := range cases {
+		sp := ToSpan(in(c.tool, c.input))
+		if got := ev.Evaluate(sp).Decision; got != c.want {
+			t.Errorf("%s: got %v want %v (span %+v)", c.name, got, c.want, sp)
+		}
+	}
+}

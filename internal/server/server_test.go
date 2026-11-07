@@ -13,6 +13,7 @@ import (
 	"github.com/calasdan-sketch/warden/internal/anomaly"
 	"github.com/calasdan-sketch/warden/internal/collect"
 	"github.com/calasdan-sketch/warden/internal/kill"
+	"github.com/calasdan-sketch/warden/internal/model"
 	"github.com/calasdan-sketch/warden/internal/policy"
 	"github.com/calasdan-sketch/warden/internal/receipt"
 	"github.com/calasdan-sketch/warden/internal/store"
@@ -257,5 +258,27 @@ func TestParseTokens(t *testing.T) {
 		if _, err := ParseTokens(bad); err == nil {
 			t.Errorf("bad tokens %q should fail", bad)
 		}
+	}
+}
+
+// A long run must not become a huge API response (the page draws 300 anyway).
+func TestRunDetailCapsSpans(t *testing.T) {
+	srv, col, _, _ := testServer(t, nil)
+	r, _, err := col.StartRun(collect.RunOptions{AgentID: "a", FleetID: "f"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxDetailSpans+50; i++ {
+		if err := col.EmitSpan(&model.Span{RunID: r.RunID, AgentID: "a", FleetID: "f", Kind: model.SpanLLMCall, Model: "m"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var d struct {
+		Spans      []map[string]any `json:"spans"`
+		SpansTotal int              `json:"spans_total"`
+	}
+	rr := get(t, srv, "/api/v1/runs/"+r.RunID, "")
+	if err := json.Unmarshal(rr.Body.Bytes(), &d); err != nil || len(d.Spans) != maxDetailSpans || d.SpansTotal != maxDetailSpans+50 {
+		t.Fatalf("spans=%d total=%d err=%v", len(d.Spans), d.SpansTotal, err)
 	}
 }

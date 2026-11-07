@@ -130,7 +130,7 @@ func TestStaticDenyAndApprovalTools(t *testing.T) {
 		t.Errorf("web_search = %v, want allow", r.Decision)
 	}
 
-	yaml := "version: 9\nshell:\n  default: allow\ndeny_tools: [nasty]\napproval_tools: []\n"
+	yaml := "version: 1\nshell:\n  default: allow\ndeny_tools: [nasty]\napproval_tools: []\n"
 	p2, err := Parse([]byte(yaml))
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +139,7 @@ func TestStaticDenyAndApprovalTools(t *testing.T) {
 	if r := ev2.Evaluate(toolSpan("nasty", "")); r.Decision != Deny {
 		t.Errorf("static deny_tools not enforced: %+v", r)
 	}
-	if r := ev2.Evaluate(toolSpan("bash", "anything")); r.Decision != Allow || r.Version != "9" {
+	if r := ev2.Evaluate(toolSpan("bash", "anything")); r.Decision != Allow || r.Version != "1" {
 		t.Errorf("default-allow shell wrong: %+v", r)
 	}
 }
@@ -429,5 +429,59 @@ func TestProtectedWardenAndHarnessFiles(t *testing.T) {
 		if r := file(path, "read"); r.Decision == Allow {
 			t.Errorf("%s must not be allowed (no trailing slash / glob)", path)
 		}
+	}
+}
+
+// A typo in a key must be an error, never a silently dropped protection.
+func TestPolicyTyposAreErrors(t *testing.T) {
+	for name, y := range map[string]string{
+		"typo in deny_patterns": "version: 1\nshell:\n  deny_pattern: ['rm']\n",
+		"typo in allow":         "version: 1\nshell:\n  alow: [git]\n",
+		"unknown top key":       "version: 1\negres:\n  default: allow\n",
+		"future version":        "version: 2\n",
+		"no version":            "shell:\n  default: deny\n",
+		"empty file":            "",
+		"bad shell default":     "version: 1\nshell:\n  default: dney\n",
+		"bad credential mode":   "version: 1\nfiles:\n  credential_adjacent: maybe\n",
+	} {
+		if _, err := Parse([]byte(y)); err == nil {
+			t.Errorf("%s: want an error", name)
+		}
+	}
+	_, err := Parse([]byte("version: 1\nshell:\n  alow: [git]\n"))
+	if err == nil || !strings.Contains(err.Error(), `unknown key "alow" on line 3`) || strings.Contains(err.Error(), "struct") {
+		t.Errorf("error should name the key and not leak Go types: %v", err)
+	}
+	if _, err := Parse([]byte(DefaultYAML)); err != nil {
+		t.Fatalf("default policy must stay valid: %v", err)
+	}
+}
+
+func TestLintAndExplain(t *testing.T) {
+	p, err := Parse([]byte("version: 1\nshell:\n  allow: [git, python3, curl, mytool]\negress:\n  allow_hosts: ['*']\nfiles:\n  credential_adjacent: allow\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msgs []string
+	for _, l := range p.Lint() {
+		msgs = append(msgs, l.Message)
+	}
+	all := strings.Join(msgs, "\n")
+	for _, want := range []string{`"python3"`, `"curl"`, `matches no host`, `credential_adjacent is allow`, `"mytool"`} {
+		if !strings.Contains(all, want) {
+			t.Errorf("lint output misses %s:\n%s", want, all)
+		}
+	}
+	d, _ := Default()
+	if len(d.Lint()) != 0 {
+		t.Errorf("default policy must lint clean: %+v", d.Lint())
+	}
+	ex := NewEvaluator(d, nil).ExplainShell("git status && npm test")
+	if ex.Result.Decision == Allow || len(ex.Segments) != 2 || ex.Segments[1].Binary != "npm" || ex.Segments[1].Risk != RiskCode || ex.Hint == "" {
+		t.Errorf("bad explanation: %+v", ex)
+	}
+	ex = NewEvaluator(d, nil).ExplainShell("jq . x.json")
+	if !strings.Contains(ex.Hint, "add to shell.allow: jq") {
+		t.Errorf("hint for an unknown harmless tool: %q", ex.Hint)
 	}
 }

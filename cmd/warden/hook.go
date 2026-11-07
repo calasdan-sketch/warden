@@ -48,7 +48,7 @@ func runHookFailClosed(dir, policyPath string, args []string) (code int) {
 			}
 		}
 	}
-	a, err := openApp(dir, policyPath)
+	a, err := openApp(dir, policyPath, true)
 	if err != nil {
 		return block(err.Error())
 	}

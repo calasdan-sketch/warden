@@ -255,7 +255,13 @@ type runDetailResp struct {
 	Spans   []*model.Span  `json:"spans"`
 	Events  []*model.Event `json:"events"`
 	Receipt any            `json:"receipt,omitempty"`
+	// SpansTotal is the run's real span count; Spans holds at most
+	// maxDetailSpans of them (the oldest), so a 100,000-span run does not
+	// become a 50 MB response. Use `warden replay` for the whole run.
+	SpansTotal int `json:"spans_total"`
 }
+
+const maxDetailSpans = 2000
 
 func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/v1/runs/")
@@ -276,7 +282,11 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 	if events == nil {
 		events = []*model.Event{}
 	}
-	resp := runDetailResp{Run: run, Spans: spans, Events: events}
+	total := len(spans)
+	if total > maxDetailSpans {
+		spans = spans[:maxDetailSpans]
+	}
+	resp := runDetailResp{Run: run, Spans: spans, Events: events, SpansTotal: total}
 	if rec, body, err := s.st.GetReceipt(id); err == nil {
 		resp.Receipt = map[string]any{"receipt": rec, "body": json.RawMessage(body)}
 	}

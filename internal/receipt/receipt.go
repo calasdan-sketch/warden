@@ -393,3 +393,50 @@ func FillFromBody(rec *model.Receipt, body string) error {
 	rec.SpanCount, rec.SpansDigest = b.SpanCount, b.SpansDigest
 	return nil
 }
+
+// RunRowMismatches compares the mutable run row kept beside a receipt with
+// the signed body. The row is what the dashboard, `runs` and `replay` show,
+// and nothing signs it, so it can be edited to disagree with the receipt.
+//
+// hard lists identity and outcome fields that can never legitimately change
+// after the seal (who ran, when it started, how it ended, who killed it).
+// soft lists the running totals: a joined emitter record may update those
+// after the seal, so a difference there is reported, not failed.
+func RunRowMismatches(run *model.Run, body string) (hard, soft []string, err error) {
+	var b receiptBody
+	if err := json.Unmarshal([]byte(body), &b); err != nil {
+		return nil, nil, fmt.Errorf("receipt body not canonical JSON: %w", err)
+	}
+	deref := func(p *string) string {
+		if p == nil {
+			return ""
+		}
+		return *p
+	}
+	str := func(field, row, signed string) {
+		if row != signed {
+			hard = append(hard, fmt.Sprintf("%s (row %q, signed %q)", field, row, signed))
+		}
+	}
+	str("agent_id", run.AgentID, b.AgentID)
+	str("fleet_id", run.FleetID, b.FleetID)
+	str("operator", run.Operator, b.Operator)
+	str("status", string(run.Status), b.Status)
+	str("kill_reason", deref(run.KillReason), b.KillReason)
+	str("killed_by", deref(run.KilledBy), b.KilledBy)
+	if bt, perr := time.Parse(time.RFC3339Nano, b.StartedAt); perr != nil || !bt.Equal(run.StartedAt) {
+		hard = append(hard, fmt.Sprintf("started_at (row %s, signed %s)", run.StartedAt.UTC().Format(time.RFC3339), b.StartedAt))
+	}
+	num := func(field string, row, signed int64) {
+		if row != signed {
+			soft = append(soft, fmt.Sprintf("%s (row %d, signed %d)", field, row, signed))
+		}
+	}
+	num("tool_calls", run.ToolCalls, b.ToolCalls)
+	num("tokens_in", run.TokensIn, b.TokensIn)
+	num("tokens_out", run.TokensOut, b.TokensOut)
+	if run.CostUSD != b.CostUSD {
+		soft = append(soft, fmt.Sprintf("cost_usd (row %.4f, signed %.4f)", run.CostUSD, b.CostUSD))
+	}
+	return hard, soft, nil
+}

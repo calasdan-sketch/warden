@@ -23,6 +23,10 @@ func (a *app) cmdInit(args []string) int {
 	fmt.Println("data dir: ", a.dataDir)
 	fmt.Println("signing key:", a.signer.KeyID())
 	fmt.Println("policy: default (deny-by-default on shell, egress, credential files)")
+	fmt.Println("\nnext:")
+	fmt.Println("  warden hook claude-code --print-config   # wire in Claude Code (or: hook codex)")
+	fmt.Println("  warden doctor                            # check the install, hooks included")
+	fmt.Println("  warden policy suggest                    # after some use: what to allowlist, and what not to")
 	return 0
 }
 

@@ -27,7 +27,7 @@ func TestReplayDemoRunsAndDetectsTamper(t *testing.T) {
 	if code := cmdDemo([]string{"--dir", dir}); code != 0 {
 		t.Fatalf("demo exit %d", code)
 	}
-	a, err := openApp(dir, "")
+	a, err := openApp(dir, "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestReplayDemoRunsAndDetectsTamper(t *testing.T) {
 
 func TestAnchorDetectsDeletedReceipts(t *testing.T) {
 	dir := t.TempDir()
-	a, err := openApp(dir, "")
+	a, err := openApp(dir, "", true)
 	if err != nil {
 		t.Fatal(err)
 	}

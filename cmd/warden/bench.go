@@ -14,6 +14,7 @@ import (
 	"github.com/calasdan-sketch/warden/internal/model"
 	"github.com/calasdan-sketch/warden/internal/policy"
 	"github.com/calasdan-sketch/warden/internal/redact"
+	"github.com/calasdan-sketch/warden/internal/replay"
 )
 
 // cmdBench measures what warden costs the agent: the latency a harness sees
@@ -79,12 +80,25 @@ func cmdBench(args []string) int {
 	}
 	redUs := float64(time.Since(t0).Nanoseconds()) / rIters / 1000
 
+	// A long recorded run, as `warden replay` builds it.
+	const replaySteps = 20000
+	rt0 := time.Now()
+	rspans := make([]*model.Span, replaySteps)
+	for i := range rspans {
+		rspans[i] = &model.Span{SpanID: fmt.Sprint(i), RunID: "bench", Kind: model.SpanFileOp, Op: "read",
+			Path: fmt.Sprintf("/work/f%d.go", i), StartedAt: rt0.Add(time.Duration(i) * time.Millisecond)}
+	}
+	rb := time.Now()
+	replay.Build(&model.Run{RunID: "bench", StartedAt: rt0}, rspans, replay.Integrity{Status: "verified"})
+	replayMs := float64(time.Since(rb).Microseconds()) / 1000
+
 	st, _ := os.Stat(exe)
 	fmt.Printf("warden bench  (%s/%s, %s, %d CPU)\n", runtime.GOOS, runtime.GOARCH, runtime.Version(), runtime.NumCPU())
 	fmt.Printf("hook round trip, fresh process per tool call (n=%d): p50 %.1f ms  p95 %.1f ms  p99 %.1f ms  max %.1f ms\n",
 		len(lat), pct(.5), pct(.95), pct(.99), lat[len(lat)-1])
 	fmt.Printf("policy decision, compound shell line: %.1f us each\n", evalUs)
 	fmt.Printf("redaction, %d-byte input: %.1f us each (%.0f MB/s)\n", len(text), redUs, float64(len(text))/redUs)
+	fmt.Printf("replay timeline, %d steps, all distinct files: %.0f ms\n", replaySteps, replayMs)
 	if st != nil {
 		fmt.Printf("binary size: %.1f MB\n", float64(st.Size())/1e6)
 	}

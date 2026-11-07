@@ -128,8 +128,8 @@ async function openDrawer(runID) {
   const spans = d.spans || [];
   if (spans.length) {
     const t0 = new Date(r.started_at).getTime();
-    const t1 = Math.max(...spans.map((s) => new Date(s.ended_at || s.started_at).getTime()), t0 + 1);
-    html += `<h3>trace waterfall (${spans.length} spans)</h3><div class="waterfall">`;
+    const t1 = spans.reduce((m, s) => Math.max(m, new Date(s.ended_at || s.started_at).getTime()), t0 + 1);
+    html += `<h3>trace waterfall (${d.spans_total || spans.length} spans)</h3><div class="waterfall">`;
     for (const s of spans.slice(0, 300)) {
       const a = Math.max(0, (new Date(s.started_at).getTime() - t0) / (t1 - t0) * 100);
       const b = Math.min(100, (new Date(s.ended_at || s.started_at).getTime() - t0) / (t1 - t0) * 100);
@@ -142,7 +142,7 @@ async function openDrawer(runID) {
         `<span class="span-kind">${esc(s.kind)}</span></div>`;
     }
     html += `</div>`;
-    if (spans.length > 300) html += `<div class="obs">showing first 300 of ${spans.length}</div>`;
+    if ((d.spans_total || spans.length) > 300) html += `<div class="obs">showing first 300 of ${d.spans_total || spans.length}; for the whole run use: warden replay ${esc(r.run_id)}</div>`;
   }
   const events = d.events || [];
   if (events.length) {

@@ -31,12 +31,15 @@ Then:
 ```bash
 ./warden demo                                  # the guided tour
 ./warden init                                  # ~/.warden: SQLite db, Ed25519 key, default policy
+./warden doctor                                # check the install: key, policy, audit trail, hook wiring
 ./warden wrap --agent ci -- npm test           # supervise any command; seals a receipt
 ./warden hook claude-code --print-config       # wire Claude Code in (see below)
 ./warden dashboard                             # http://127.0.0.1:8420: fleet view, traces, kill buttons
 ./warden verify                                # signatures + chain + every signed trace
 ./warden runs                                  # recent runs: find the id of the one that went wrong
 ./warden replay last                           # step through it: timeline, verdicts, tamper check
+./warden summary --since 7d                    # plain digest: runs, what was stopped and why, hosts, kills
+./warden policy suggest                        # what to allowlist (and what not to), from what was stopped
 ./warden bench                                 # what warden costs per tool call, on YOUR machine
 ```
 
@@ -77,6 +80,15 @@ warden hook codex --print-config         # paste into ~/.codex/hooks.json
 | not on an allowlist, or a risky form of an allowlisted command (default deny) | `"ask"`, or deny with `--strict` | defers to Codex's own approvals, or deny with `--strict` |
 | session killed / agent quarantined / fleet frozen | deny, every call, until a new session | exit 2 |
 | warden itself fails (unreadable data dir, broken policy, locked DB, crash) | deny (fail-closed), unless `--fail-open` | exit 2, unless `--fail-open` |
+
+Tools that are neither shell nor file tools get the same path checks on their
+arguments. That covers every MCP server (an MCP filesystem server reads and writes files
+without touching the file hooks): a path into warden's own files is denied, a credential
+store (`~/.ssh`, `~/.aws`, `.env`, browser profiles, ...) goes to a human. For `Glob` and `Grep`,
+the `pattern` / `glob` field is judged too (`/home/me/.aws/*`, `**/.env`), and a `Grep` or `Glob`
+rooted at a home directory (`~`, `/home/me`, `/`) goes to a human, because it would return lines
+from every credential file in it. Ordinary words such as "credentials" in a tool's text are
+not treated as paths.
 
 Each harness session is one warden run, keyed by the harness `session_id`.
 `SessionEnd` (both harnesses) seals it. A session that never sends it is sealed
@@ -119,6 +131,12 @@ and the [official Codex hooks docs](https://learn.chatgpt.com/docs/hooks)
   types. It lists every record no signature covers, prefixed `UNSIGNED`: late
   spans, spans of runs with no receipt, and run and kill-audit rows. It fails
   when unsigned spans are present, unless you pass `--allow-unsigned`.
+- **The run record is checked against its receipt.** The row that `runs`, `replay` and the
+  dashboard show (agent, fleet, operator, status, start time, kill reason, who killed it) is
+  not itself signed. `verify` and `replay` compare it with the signed body and fail on any
+  difference, so rewriting a run's agent or status in SQLite no longer passes as verified.
+  Running totals (calls, tokens, cost) may legitimately change after the seal when a sibling
+  tool's record is joined, so a difference there is printed as a note, not a failure.
 - **Not covered:** events, alerts, the kill-audit table and approvals are
   stored but not signed. Receipts sealed by older builds sign their totals
   only. `verify` says so.
@@ -147,6 +165,12 @@ warden replay --bundle audit.jsonl --pubkey receipt.pub <run>   # an auditor's c
   ("would the new policy have stopped this?") or newly allowed ("will the new policy
   break our workflow?"). Calls that were stopped by operator state (kill, quarantine,
   freeze) are listed as not replayable. It does not re-run anything.
+- **Long runs.** The timeline is built in linear time (60,000 steps in under a second; it used
+  to be quadratic, minutes for 20,000). Each step's JSON carries `files_count`, `hosts_count`
+  and `tools_count`; the lists themselves (first 50, sorted) are on every step only for runs up to
+  2,000 steps, and otherwise on the last step. `replay --step N` always shows them. The HTML page
+  shows a window of about 400 rows around the selected step; it still embeds every span, so a
+  60,000-span run is a page of about 30 MB.
 - Everything in the trail is untrusted text. Terminal escapes, bidi and zero-width
   characters are stripped; the HTML page is rendered with `textContent` under a
   `default-src 'none'` content-security policy.
@@ -249,7 +273,7 @@ stack was not run here, so its footprint is **unverified**).
 
 What each does, from its own docs or from running it (anything else is "unverified"):
 
-| Capability | warden | aileron | Langfuse / Phoenix / AgentOps / Traceloop | Microsoft Agent Governance Toolkit | Teleport (agent access) |
+| Capability | warden | aileron | Langfuse / Phoenix / AgentOps / Traceloop | Microsoft Agent Governance Toolkit (4.1.0, Public Preview, MIT) | Teleport (agent access) |
 |---|---|---|---|---|---|
 | Blocks a tool call before it runs | yes (hooks, wrap, gate) | yes (MCP stdio proxy rules; ran its demo) | no: observability and evals | yes: stateless policy engine on every action, p99 under 0.1 ms reported ([source](https://www.helpnetsecurity.com/2026/04/03/microsoft-ai-agent-governance-toolkit/)) | yes: RBAC on MCP tools ([source](https://goteleport.com/use-cases/agentic-ai/)) |
 | Kill switch (run / agent / fleet / tool) | yes | not in its CLI | no | yes ("emergency termination") | not described on the page we read |
@@ -261,6 +285,11 @@ What each does, from its own docs or from running it (anything else is "unverifi
 | Incident replay | yes: timeline, state at a step, what-if policy, HTML | yes: single-file HTML report; `detect` replays a log | trace viewers; session replay in AgentOps (per [summary](https://www.morphllm.com/ai-agent-observability-tools)) | unverified | session recording |
 | Counterfactual ("would policy B have stopped this?") | yes | not found | no | unverified | unverified |
 | Runs on Windows | builds and vets; **not yet run on a real Windows host** | pure Python | yes | yes (.NET and Python) | yes |
+
+Checked again on 2026-11-07: aileron is still 0.1.6 on PyPI, and the Microsoft toolkit is now
+published as [`agent-governance-toolkit` 4.1.0](https://pypi.org/project/agent-governance-toolkit/)
+("Public Preview", MIT). We read its PyPI page and did not install or run it, so every "unverified" in
+its column stands.
 
 Other vendors (LangSmith, Helicone, Datadog LLM Observability, Invariant Labs, Lasso,
 Endor Labs) are described in the first table above; we did not run them, and we cannot
@@ -276,12 +305,16 @@ go test ./internal/policy -run 'Evasion|Benign' -v   # shell-policy evasion corp
 
 | Measure | Before (0.1.0 code) | Now (0.2.0) |
 |---|---|---|
-| Shell-policy evasion corpus (57 commands that must not be allowed) | 18 blocked, **39 bypasses** | **57 blocked**, 0 bypasses; 28 benign commands still allowed |
+| Shell-policy evasion corpus (92 commands that must not be allowed; 57 in round 2, 35 added in round 3) | round 2: 57 blocked. Round 3 added 35 cases that were open: **33 bypasses** found before the fixes | **92 blocked**, 0 bypasses; 44 benign commands still allowed |
 | Secret-redaction corpus (46 cases: vendor tokens, URLs, headers, flags, assignments, encodings) | 14 redacted, 32 leaked | **46 redacted**; 13 benign strings untouched |
 | Hook calls wrongly denied under 8-way concurrency ("database is locked", fail-closed) | 12-32% of calls | 0 of 2400 (4 to 32-way, fresh and existing data dir) |
-| Hook round trip p50 / p99 (2-CPU VM, `warden bench`) | not measured | about 9 ms / 14 ms |
-| Policy decision for a compound shell line | n/a | about 60 us |
-| Redaction, 1 KB of clean text | n/a | about 80 us (13 MB/s); 5 MB of padding in under 0.5 s |
+| Replay timeline build, 20,000 steps with distinct files | about 3 minutes (60,000 steps: did not finish) | about 115 ms (60,000 steps: under 1 s; `replay` on a 60,000-span run: 5 s end to end) |
+| Hook round trip p50 / p99 (2-CPU VM, `warden bench`) | not measured | about 9 ms / 14 ms when the VM is idle; 24-40 ms / 55-100 ms on 2026-11-07 while other jobs shared it (load average 7-10) |
+| Policy decision for a compound shell line | n/a | about 60 us idle; 90-170 us on the shared VM, the same before and after round 3 (3 runs each) |
+| Redaction, 1 KB of clean text | n/a | about 80 us (13 MB/s) idle; 100-200 us shared; 5 MB of padding in under 0.5 s |
+
+Round 3 also tested a 60,000-span run on the shared VM: `verify` of the store 9 s, JSONL export 8 s,
+`verify --bundle` 5.6 s, OTLP export 17 s. Those were not tuned.
 
 The two corpora were written by us after hands-on testing, so the "before" numbers
 show the gaps we found, not an independent score. They are committed so anyone can add
@@ -306,7 +339,10 @@ a case that breaks us.
 | `runs [--limit N --agent A --status S]` | List recent runs (find the id to replay). |
 | `replay <run\|prefix\|last> [--step N] [--only-gated] [--what-if FILE] [--json] [--html FILE]` | Step through a recorded run (see above). `--bundle FILE --pubkey KEY` replays an export with no data dir. Exits 3 when the trail fails verification. |
 | `anchor [--out FILE]` | Emit a signed chain-head anchor to ship off the machine. `verify --anchors FILE` checks it. |
-| `bench [--n N]` | Measure hook latency, policy and redaction cost on this machine. |
+| `doctor` | Check key, policy, audit trail and hook wiring. Exit 1 on a failure. Creates nothing. |
+| `policy check [FILE] [--strict]` / `policy explain "<cmd>"` / `policy suggest [--since D] [--min N]` | Validate and lint the policy, explain one command's verdict, suggest allowlist changes from history. |
+| `summary [--since 24h] [--json]` | Digest of a time window: runs, calls, what was stopped and why, hosts, kills. |
+| `bench [--n N]` | Measure hook latency, policy, redaction and replay cost on this machine. |
 | `report --from shortleash\|planok\|mcp-jail\|calas-gateway --file X [--watch]` | Ingest a sibling tool's JSONL feed. |
 | `version` | Build info. |
 
@@ -327,6 +363,14 @@ files:
   credential_adjacent: require_approval   # or deny
 approval_tools: [kubectl]
 ```
+
+**A typo is an error, not a silent hole.** Unknown keys (`deny_pattern:`, `alow:`), an
+unsupported `version`, an empty file and bad values for `shell.default`, `egress.default` and
+`files.credential_adjacent` are rejected with the line and the key. While the file is invalid,
+the commands that gate (`wrap`, `gate`, hooks, `dashboard`, `report`, `span`) refuse to run, and a
+hook denies every call. Commands that only read, verify or stop things (`kill`, `verify`,
+`runs`, `replay`, `export`, `anchor`, `approve`) keep working on the built-in default and say so,
+so the kill switch is never locked behind a typo.
 
 Rules are checked in this order: the dynamic deny-list (`kill --scope tool`),
 then `deny_tools`, shell deny patterns, credential-adjacent paths,
@@ -375,6 +419,41 @@ Each simple command is also parsed so it can't sneak around the allowlist:
 - **Environment dumps.** `env`, `printenv`, `set`, `export -p`, `declare -p` and
   `/proc/<pid>/environ` can print every secret in the process; they need approval.
 - **Long commands.** A shell command over 256 KiB is refused, not analyzed.
+- **Programs told to run programs.** `sort --compress-program`, `git grep -O` /
+  `--open-files-in-pager` and the git forms listed above are denied: they execute whatever
+  they are given.
+- **Remotes without a scheme.** `evil.example:path`, `--repo=URL` and `--remote=URL` are judged
+  against `egress.allow_hosts` like `user@host:path`. A branch refspec with a dotted name on both
+  sides (`my.branch:my.branch`) looks the same and is sent to a human; that is a known
+  false positive.
+- **Wildcard and persistence targets.** A write to `~/.b*` or `~/.bashr?` is treated as a possible
+  startup file. More persistence paths need approval: `~/.vimrc`, `.tmux.conf`, `.npmrc`,
+  `~/.config/git/`, `~/.cargo/config*`, `~/.local/bin/`, `~/.ssh/config`, `.husky/`,
+  `.github/workflows/`, `.mcp.json`, `.vscode/settings.json`, `.claude/commands/`.
+- **Searching a whole home directory.** `grep -r` (any recursive form) over `~`, `$HOME`,
+  `/home/<user>`, `/root`, `/` or `/etc` is denied; name a project directory instead.
+- **More credential stores.** `~/.codex/auth.json`, shell and REPL history files, and macOS
+  browser stores written with escaped spaces or quotes.
+
+### Tune the policy, and check it
+
+```bash
+warden policy check [FILE] [--strict]     # strict parse + lint; --strict exits 3 on warnings
+warden policy explain "git status; npm test"   # allowed / stopped, command by command, and what to change
+warden policy suggest [--since 7d] [--min 2]   # from what was actually stopped
+warden doctor                             # key, policy, audit trail, hooks; creates nothing
+warden summary [--since 24h] [--json]     # digest for a person or a script
+```
+
+`check` warns about settings that quietly remove protection: `shell.default: allow`,
+`egress.default: allow`, `credential_adjacent: allow`, an allowlisted interpreter, shell or
+network tool (`python3`, `bash`, `curl`, `ssh`, ...), `deny_patterns` that match everything, and
+`allow_hosts` entries that match no host. `suggest` reads the recorded history and groups what was
+stopped by program. It only puts read-only programs in the snippet it offers; programs that
+change files are listed with a warning, and programs that run code or reach the network are
+labelled NOT recommended. It never edits your policy. Its input is the stored command text
+(redacted, cut at 4 KiB). `summary` counts what the record says (`hosts` and `files` are what hooks
+and spans reported); it is a digest, not a check: run `verify` for that.
 
 **What to allowlist.** The default allowlist is `git ls cat echo mkdir pwd
 head tail wc grep diff sort which`: commands that can't run other code or
@@ -466,6 +545,9 @@ agent run as the **same OS user**, which sets hard limits:
   and passes `go vet` for windows/amd64 and windows/arm64, `wrap` uses `cmd /C` and
   kills the process tree with `taskkill /T`, but nobody has run it on a real Windows
   host yet, and the test suite has not been run there.
+- The policy reads command text. Round 3 closed 33 more ways around the default allowlist, and the
+  corpus will keep growing; it is still not a sandbox.
+- `summary` and `policy suggest` work from stored, redacted text and from what hooks reported.
 - SQLite only. Single-decider approvals. One signing key per data dir, with no
   rotation ceremony yet.
 - `verify --bundle` holds the bundle's spans in memory. Split very large

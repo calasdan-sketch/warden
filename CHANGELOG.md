@@ -6,6 +6,53 @@ Expert deep-dive round 2: found by testing warden the way a platform team, a
 security reviewer and an incident responder would. Everything below has a test; the
 two corpora and `warden bench` are committed so the numbers can be re-run.
 
+### Round 3 (2026-11-07): attacker, performance, auditor, first-day user, competitor
+Found by a second hands-on panel (`reviews/round3.md` has the findings and the scored idea list).
+
+#### Fixed
+- **`replay` was quadratic.** The timeline re-sorted the whole set of touched files on every
+  step: 2,000 steps took 2.8 s, 20,000 took about 3 minutes, 60,000 never finished. Now linear
+  (20,000 steps in about 115 ms; a real 60,000-span run replays in 5 s). The HTML page shows a
+  window of rows instead of rebuilding all of them on each key press.
+- **`verify` and `replay` trusted the editable run record.** Rewriting a run's agent, status or kill
+  reason in SQLite still printed "verified". Both now compare the run row with the signed
+  receipt (identity and outcome fields fail; running totals that a joined record may update are
+  notes). A bad row no longer breaks the receipt chain report.
+- **A typo in `policy.yaml` silently removed protection** (`deny_pattern:` instead of
+  `deny_patterns:`). Policy parsing is now strict: unknown keys, `version` other than 1, an empty
+  file and bad `default` / `credential_adjacent` values are errors that name the line and key.
+  Hooks fail closed on such a file, as before for unparseable ones.
+- **A broken policy file locked out `kill`, `verify`, `replay` and `export`.** Only commands that
+  gate now require a valid policy; the others continue on the built-in default and warn.
+- **MCP tools and search patterns bypassed the credential and self-protection checks.** An MCP
+  filesystem server could read `~/.ssh/id_rsa` or write `~/.warden/policy.yaml` with no prompt.
+  Path-like values in any non-shell tool's arguments are now judged; `Glob` `pattern` and `Grep`
+  `glob` are judged; `Grep` / `Glob` rooted at a home directory ask a human.
+- **33 shell-policy gaps** (corpus 57 -> 92, 44 benign commands still allowed): `sort
+  --compress-program`, `git grep -O`, scp-style remotes with no user and `--repo=URL`, wildcard
+  write targets, more persistence paths, recursive `grep` of home / root, history files and
+  `~/.codex/auth.json`, macOS browser stores written with escaped spaces.
+- Dashboard run detail no longer sends every span (capped at 2,000 with `spans_total`), and the
+  page no longer spreads the whole list into `Math.max`.
+
+#### Added
+- `warden doctor`, `warden policy check|explain|suggest`, `warden summary` (see the README).
+- `bench` reports replay speed. `init` prints next steps.
+- `StateAt(n)` on a replay session; the JSON of a step now has `files_count`, `hosts_count`,
+  `tools_count`.
+
+#### Changed (compatible unless you parse the replay JSON)
+- In `replay --json` / the HTML data, the per-step lists `files_touched`, `hosts_contacted` and
+  `tools_used` are omitted when empty, and on runs longer than 2,000 steps are present on the
+  last step only (use the counts, or `replay --step N`). 0.2.0 is unreleased, so no released
+  format changes.
+- Policy files with unknown keys that used to load now fail. `warden policy check` finds them.
+- A dotted branch refspec (`my.branch:my.branch`) can be sent to a human as a possible scp host.
+
+#### Not done
+RFC 3161 timestamping, key rotation, OS-keychain storage, signed kill audit, streaming bundle
+verification, per-agent policy profiles, a run on a real Windows host.
+
 ### Fixed (found by concurrency testing)
 - **Hook calls were wrongly denied under load.** With 8 or more `warden hook`
   processes starting together, 12-32% failed with `database is locked` and were

@@ -73,11 +73,11 @@ func (a *app) resolveRun(id string) (*model.Run, error) {
 }
 
 // integrityFor judges one run's trail against its receipt.
-func integrityFor(rec *model.Receipt, body string, spans []*model.Span, pub ed25519.PublicKey, full bool) replay.Integrity {
+func integrityFor(rec *model.Receipt, body string, spans []*model.Span, pub ed25519.PublicKey, full bool, row *model.Run) replay.Integrity {
 	if rec == nil {
 		return replay.Integrity{Status: "unsealed", Detail: "no signed receipt for this run: nothing here is tamper-evident"}
 	}
-	rep := audit.Verify([]audit.Item{{Receipt: rec, Body: body, Spans: spans, FullHeader: full}}, pub)
+	rep := audit.Verify([]audit.Item{{Receipt: rec, Body: body, Spans: spans, FullHeader: full, Run: row}}, pub)
 	in := replay.Integrity{Late: rep.LateSpans}
 	for _, p := range rep.Problems {
 		if !strings.HasPrefix(p, "chain:") {
@@ -100,6 +100,9 @@ func integrityFor(rec *model.Receipt, body string, spans []*model.Span, pub ed25
 		if rep.LateSpans > 0 {
 			in.Detail += fmt.Sprintf("; %d span(s) arrived after the seal and are NOT covered", rep.LateSpans)
 		}
+	}
+	if len(rep.Notes) > 0 && in.Status != "tampered" {
+		in.Detail += "; NOTE: " + strings.Join(rep.Notes, "; ")
 	}
 	return in
 }
@@ -183,7 +186,7 @@ func cmdReplayWith(a *app, args []string) int {
 			TokensIn: rc.TokensIn, TokensOut: rc.TokensOut, CostUSD: rc.CostUSD, ToolCalls: rc.ToolCalls, KillReason: rc.KillReason, KilledBy: rc.KilledBy}
 		end := rc.SealedAt
 		run.EndedAt = &end
-		sess = replay.Build(run, item.Spans, integrityFor(rc, item.Body, item.Spans, pub, true))
+		sess = replay.Build(run, item.Spans, integrityFor(rc, item.Body, item.Spans, pub, true, nil))
 	} else {
 		run, err := a.resolveRun(rest[0])
 		if err != nil {
@@ -205,9 +208,9 @@ func cmdReplayWith(a *app, args []string) int {
 		case perr != nil:
 			in = replay.Integrity{Status: "tampered", Detail: "cannot load the public key, so nothing can be verified: " + perr.Error()}
 		case rerr != nil:
-			in = integrityFor(nil, "", spans, pub, false)
+			in = integrityFor(nil, "", spans, pub, false, nil)
 		default:
-			in = integrityFor(rec, body, spans, pub, false)
+			in = integrityFor(rec, body, spans, pub, false, run)
 		}
 		sess = replay.Build(run, spans, in)
 	}

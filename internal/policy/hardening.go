@@ -18,6 +18,7 @@ var writerBins = map[string]bool{
 	"truncate": true, "rm": true, "rsync": true, "scp": true, "dd": true, "sed": true,
 	"curl": true, "wget": true, "sort": true, "gcc": true, "cc": true, "go": true,
 	"chmod": true, "chown": true, "mkdir": true, "rmdir": true, "shred": true,
+	"uniq": true, "xxd": true, "split": true, "csplit": true, "patch": true,
 }
 
 var rcFiles = map[string]bool{
@@ -25,6 +26,9 @@ var rcFiles = map[string]bool{
 	".zshrc": true, ".zprofile": true, ".zshenv": true, ".zlogin": true, ".zlogout": true,
 	".inputrc": true, ".gitconfig": true, ".gitattributes": true, "authorized_keys": true,
 	"known_hosts": true, "sudoers": true, "crontab": true, "config.fish": true, ".xinitrc": true, ".xprofile": true,
+	".vimrc": true, ".exrc": true, ".tmux.conf": true, ".screenrc": true, ".curlrc": true, ".wgetrc": true,
+	".npmrc": true, ".pypirc": true, ".netrc": true, ".envrc": true, ".pam_environment": true, ".xsession": true,
+	".xsessionrc": true, ".mcp.json": true, ".pre-commit-config.yaml": true,
 }
 
 var deviceRe = regexp.MustCompile(`^/dev/(?:sd|hd|vd|xvd|nvme|mmcblk|disk|rdisk|mem$|kmem$|port$|kmsg$)`)
@@ -37,6 +41,22 @@ func sensitiveWrite(path string) (reason string, hard bool, ok bool) {
 	p = strings.Trim(p, `"'`)
 	if p == "" {
 		return "", false, false
+	}
+	// A wildcard in the target ("~/.b*", "~/.bashr?") could expand to a
+	// startup file: judge it by whether the pattern can match one.
+	if strings.ContainsAny(p, "*?[") {
+		base := p
+		if i := strings.LastIndex(p, "/"); i >= 0 {
+			base = p[i+1:]
+		}
+		for name := range rcFiles {
+			if strings.Trim(base, "*?[]") != "" && globOK(base, name) {
+				return "may write a shell or login startup file (wildcard target)", false, true
+			}
+		}
+	}
+	if r, ok := sensitiveWriteDir(p); ok {
+		return r, false, true
 	}
 	if deviceRe.MatchString(p) {
 		return "writes to a raw device", true, true
@@ -55,12 +75,26 @@ func sensitiveWrite(path string) (reason string, hard bool, ok bool) {
 		}
 	}
 	for _, sub := range []string{"/.git/hooks/", "/.config/autostart/", "/.config/systemd/", "/library/launchagents/",
-		"/start menu/programs/startup/", "/.vscode/tasks.json", "/.git/config"} {
+		"/start menu/programs/startup/", "/.vscode/tasks.json", "/.vscode/settings.json", "/.vscode/launch.json", "/.git/config",
+		"/.husky/", "/.github/workflows/", "/.config/git/", "/.cargo/config", "/.local/bin/", "/.ssh/config", "/.ssh/rc",
+		"/.ssh/environment", "/.config/fish/", "/.config/nvim/", "/.config/pip/", "/.claude/commands/", "/.claude/hooks/",
+		"/.claude/agents/", "/.codex/prompts/", "/.gitlab-ci.yml"} {
 		if strings.Contains(p, sub) || strings.HasPrefix(p, sub[1:]) {
 			return "writes a path that runs code later (hooks, autostart, tasks)", false, true
 		}
 	}
 	return "", false, false
+}
+
+// sensitiveWriteDir catches writes into whole directories whose files run
+// code or change trust (a bare directory prefix without a leading slash).
+func sensitiveWriteDir(p string) (string, bool) {
+	for _, pre := range []string{".husky/", ".github/workflows/", ".git/hooks/", ".vscode/tasks.json", ".claude/commands/", ".claude/hooks/", ".claude/agents/"} {
+		if strings.HasPrefix(p, pre) || strings.HasPrefix(p, "./"+pre) {
+			return "writes a path that runs code later (hooks, CI, agent commands)", true
+		}
+	}
+	return "", false
 }
 
 // redirectTargets returns the file targets of output redirections (>, >>,
@@ -172,11 +206,20 @@ func sensitiveWriteInCommand(cmd string) (target, reason string, hard, found boo
 	return
 }
 
-var urlHostRe = regexp.MustCompile(`^(?:[a-zA-Z][a-zA-Z0-9+.-]*://|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:)`)
+// A remote is a URL, user@host:path, or host.tld:path (scp syntax without a
+// user). The last form needs a letters-only TLD so refspecs like v1.2:v1.2
+// and branch:branch are not mistaken for hosts.
+var urlHostRe = regexp.MustCompile(`^(?:[a-zA-Z][a-zA-Z0-9+.-]*://|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}:)`)
 
 // remoteHost extracts the host of a URL-like or scp-like (user@host:path)
 // git remote argument.
 func remoteHost(a string) (string, bool) {
+	// --repo=URL, --remote=URL and similar: judge the value.
+	if strings.HasPrefix(a, "--") {
+		if i := strings.IndexByte(a, '='); i > 0 {
+			a = a[i+1:]
+		}
+	}
 	if !urlHostRe.MatchString(a) {
 		return "", false
 	}
@@ -187,9 +230,9 @@ func remoteHost(a string) (string, bool) {
 		}
 		return strings.ToLower(u.Hostname()), true
 	}
-	at := strings.IndexByte(a, '@')
-	colon := strings.IndexByte(a[at:], ':')
-	return strings.ToLower(a[at+1 : at+colon]), true
+	at := strings.IndexByte(a, '@') // -1 for the user-less form: a[0:] is the host
+	colon := strings.IndexByte(a[at+1:], ':')
+	return strings.ToLower(a[at+1 : at+1+colon]), true
 }
 
 func (e *Evaluator) hostAllowed(host string) bool {
@@ -220,10 +263,18 @@ func (e *Evaluator) riskyExtra(ci CommandInfo) string {
 			}
 		}
 		switch sub {
-		case "push", "fetch", "pull", "clone", "ls-remote", "remote", "archive", "fetch-pack", "send-pack", "request-pull", "submodule":
+		case "push", "fetch", "pull", "clone", "ls-remote", "remote", "archive", "fetch-pack", "send-pack", "request-pull", "submodule", "bundle":
 			for _, a := range ci.Args {
 				if host, ok := remoteHost(a); ok && !e.hostAllowed(host) {
 					return fmt.Sprintf("git %s reaches host %q, which is not in egress allow_hosts", sub, host)
+				}
+			}
+		}
+	case "grep", "egrep", "fgrep":
+		if recursiveGrep(ci.Args) {
+			for _, a := range ci.Args {
+				if broadRoot(a) {
+					return fmt.Sprintf("searches %q recursively, which reads credential files (name a project directory instead)", a)
 				}
 			}
 		}
@@ -242,4 +293,40 @@ func (e *Evaluator) riskyExtra(ci CommandInfo) string {
 		}
 	}
 	return ""
+}
+
+// recursiveGrep reports whether grep's arguments ask for a directory walk.
+func recursiveGrep(args []string) bool {
+	for _, a := range args {
+		switch {
+		case a == "--recursive" || a == "--dereference-recursive" || strings.HasPrefix(a, "--directories=recurse"):
+			return true
+		case strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && strings.ContainsAny(a, "rR"):
+			return true
+		}
+	}
+	return false
+}
+
+// broadRoot reports whether a path names a home directory, a directory of
+// home directories or the filesystem root: places that hold credential files.
+func broadRoot(a string) bool {
+	a = strings.Trim(a, `"'`)
+	if a == "" || strings.HasPrefix(a, "-") {
+		return false
+	}
+	t := strings.TrimRight(a, "/")
+	switch strings.ToLower(t) {
+	case "", "~", "$home", "${home}", "/home", "/users", "/root", "/mnt", "/media", "/var", "/etc", "/opt":
+		return true
+	}
+	if strings.HasPrefix(t, "~") && !strings.Contains(t, "/") { // ~user
+		return true
+	}
+	// /home/<user> and /Users/<user> exactly, or with a wildcard.
+	parts := strings.Split(strings.Trim(t, "/"), "/")
+	if len(parts) == 2 && (parts[0] == "home" || parts[0] == "Users") {
+		return true
+	}
+	return false
 }

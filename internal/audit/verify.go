@@ -28,6 +28,11 @@ type Item struct {
 	// FullHeader marks receipts whose every header field was read from an
 	// export: they must all equal the signed body.
 	FullHeader bool
+	// Run is the live store's mutable run row for this receipt (nil in an
+	// export). When set, its identity and outcome fields must equal the
+	// signed body, so the rows `runs`, `replay` and the dashboard show cannot
+	// be edited away from what was sealed.
+	Run *model.Run
 }
 
 // Report is the outcome of a verification pass.
@@ -37,6 +42,7 @@ type Report struct {
 	TraceSigned int      // receipts that carry a trace commitment
 	LegacyNoTrc int      // receipts sealed before trace digests (totals-only)
 	LateSpans   int      // spans recorded after their seal (kept, not covered)
+	Notes       []string // differences that are reported but not failures
 	ChainOK     bool     // hash chain intact (genesis → head, no forks/gaps)
 	Problems    []string // human-readable failures
 	// Unsigned lists records present but NOT covered by any signature:
@@ -52,6 +58,7 @@ func Verify(items []Item, pub ed25519.PublicKey) *Report {
 	rep := &Report{Receipts: len(items)}
 	var recs []*model.Receipt
 	for _, it := range items {
+		rowBad := false
 		if err := receipt.Verify(it.Receipt, it.Body, pub); err != nil {
 			rep.Problems = append(rep.Problems, fmt.Sprintf("%s: %v", it.Receipt.RunID, err))
 			continue
@@ -64,6 +71,20 @@ func Verify(items []Item, pub ed25519.PublicKey) *Report {
 			if it.Receipt.KeyID != "" && it.Receipt.KeyID != receipt.KeyIDOf(pub) {
 				rep.Problems = append(rep.Problems, fmt.Sprintf("%s: key_id %s is not the supplied key", it.Receipt.RunID, it.Receipt.KeyID))
 				continue
+			}
+		}
+		if it.Run != nil {
+			hard, soft, err := receipt.RunRowMismatches(it.Run, it.Body)
+			if err != nil {
+				rep.Problems = append(rep.Problems, fmt.Sprintf("%s: %v", it.Receipt.RunID, err))
+				continue
+			}
+			if len(hard) > 0 {
+				rep.Problems = append(rep.Problems, fmt.Sprintf("%s: run record disagrees with its signed receipt: %s", it.Receipt.RunID, strings.Join(hard, "; ")))
+				rowBad = true // the receipt itself is sound: it still counts for the chain
+			}
+			for _, m := range soft {
+				rep.Notes = append(rep.Notes, fmt.Sprintf("%s: running total differs from the signed receipt: %s", it.Receipt.RunID, m))
 			}
 		}
 		for _, sp := range it.Spans {
@@ -81,6 +102,9 @@ func Verify(items []Item, pub ed25519.PublicKey) *Report {
 		}
 		if err != nil {
 			rep.Problems = append(rep.Problems, fmt.Sprintf("%s: %v", it.Receipt.RunID, err))
+			continue
+		}
+		if rowBad {
 			continue
 		}
 		rep.Valid++

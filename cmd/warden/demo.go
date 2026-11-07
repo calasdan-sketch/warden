@@ -44,7 +44,7 @@ func cmdDemo(args []string) int {
 		fmt.Fprintln(os.Stderr, "demo:", err)
 		return 1
 	}
-	a, err := openApp(*dir, "")
+	a, err := openApp(*dir, "", true)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "demo:", err)
 		return 1

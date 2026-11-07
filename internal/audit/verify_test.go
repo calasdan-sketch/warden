@@ -218,3 +218,52 @@ func TestBundleHeaderEditsAndUnsignedRecords(t *testing.T) {
 		t.Error("unknown record type must be rejected")
 	}
 }
+
+// The run row beside a receipt (what `runs`, `replay` and the dashboard
+// show) is not signed. Editing it must not pass as a verified receipt.
+func TestRunRowMustMatchSignedReceipt(t *testing.T) {
+	s, _ := receipt.Generate()
+	items := buildChain(t, s, 2)
+	rowFor := func(it Item) *model.Run {
+		r := &model.Run{RunID: it.Receipt.RunID, AgentID: it.Receipt.AgentID, FleetID: it.Receipt.FleetID,
+			Status: it.Receipt.Status, StartedAt: it.Receipt.StartedAt, KillReason: it.Receipt.KillReason, KilledBy: it.Receipt.KilledBy}
+		return r
+	}
+	for i := range items {
+		items[i].Run = rowFor(items[i])
+	}
+	if rep := Verify(items, s.PublicKey()); !rep.OK() {
+		t.Fatalf("matching rows must verify: %+v", rep.Problems)
+	}
+	// Hard fields: agent, fleet, operator, status, start time, kill reason/by.
+	edits := map[string]func(r *model.Run){
+		"agent":  func(r *model.Run) { r.AgentID = "someone-else" },
+		"fleet":  func(r *model.Run) { r.FleetID = "other" },
+		"status": func(r *model.Run) { r.Status = model.RunCompleted },
+		"start":  func(r *model.Run) { r.StartedAt = r.StartedAt.Add(time.Hour) },
+		"reason": func(r *model.Run) { x := "benign"; r.KillReason = &x },
+		"by":     func(r *model.Run) { x := "nobody"; r.KilledBy = &x },
+	}
+	for name, edit := range edits {
+		its := buildChain(t, s, 2)
+		for i := range its {
+			its[i].Run = rowFor(its[i])
+		}
+		edit(its[0].Run)
+		rep := Verify(its, s.PublicKey())
+		if rep.OK() || !strings.Contains(strings.Join(rep.Problems, "|"), "run record disagrees") {
+			t.Errorf("%s edit not caught: %+v", name, rep.Problems)
+		}
+		if !rep.ChainOK {
+			t.Errorf("%s edit: the receipts themselves are intact, the chain must still hold", name)
+		}
+	}
+	// Running totals are reported, not failed: a joined emitter record may update them after the seal.
+	its := buildChain(t, s, 1)
+	its[0].Run = rowFor(its[0])
+	its[0].Run.CostUSD = 9
+	rep := Verify(its, s.PublicKey())
+	if !rep.OK() || len(rep.Notes) != 1 {
+		t.Errorf("a changed total should be a note, not a failure: ok=%v notes=%v", rep.OK(), rep.Notes)
+	}
+}

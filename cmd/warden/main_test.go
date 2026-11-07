@@ -23,7 +23,7 @@ func TestDemoEndToEnd(t *testing.T) {
 		t.Fatalf("bundle verify without --pubkey must refuse, exit %d", code)
 	}
 	// The demo tampered with the live store: store verification must fail.
-	a, err := openApp(dir, "")
+	a, err := openApp(dir, "", true)
 	if err != nil {
 		t.Fatal(err)
 	}

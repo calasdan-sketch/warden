@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"time"
 
 	"github.com/calasdan-sketch/warden/internal/model"
 )
@@ -229,6 +230,40 @@ func (s *Store) ListAlerts(status string, limit int) ([]*model.Alert, error) {
 		}
 		a.At = t
 		out = append(out, &a)
+	}
+	return out, rows.Err()
+}
+
+// SpansSince returns spans that started at or after since, newest first, up
+// to limit. gatedOnly keeps only spans the policy did not simply allow.
+// It is read-only and meant for reports (summary, policy suggest).
+func (s *Store) SpansSince(since time.Time, gatedOnly bool, limit int) ([]*model.Span, error) {
+	if limit <= 0 {
+		limit = 100000
+	}
+	q := `SELECT span_id,run_id,kind,name,agent_id,fleet_id,started_at,ended_at,status,
+		model,tokens_in,tokens_out,tokens_cached,cost_usd,cache_hit,
+		tool,tool_server,args_summary,arg_hash,exit_status,output_bytes,
+		path,op,count,bytes,host,port,net_bytes,child_run_id,spawn_reason,
+		gate,decision,approver,decision_latency_ms,
+		policy_decision,policy_reason,policy_version,redacted,late,tool_call_id
+		FROM spans WHERE started_at >= ?`
+	if gatedOnly {
+		q += ` AND policy_decision NOT IN ('allow','')`
+	}
+	q += ` ORDER BY started_at DESC, rowid DESC LIMIT ?`
+	rows, err := s.db.Query(q, ts(since), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*model.Span
+	for rows.Next() {
+		sp, err := scanSpan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sp)
 	}
 	return out, rows.Err()
 }

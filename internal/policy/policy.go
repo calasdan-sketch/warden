@@ -8,7 +8,10 @@
 package policy
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -156,8 +159,15 @@ func Load(path string) (*Policy, error) {
 // Parse parses policy YAML.
 func Parse(b []byte) (*Policy, error) {
 	var p Policy
-	if err := yaml.Unmarshal(b, &p); err != nil {
-		return nil, fmt.Errorf("parse policy: %w", err)
+	// Strict: an unknown key is almost always a typo ("deny_pattern:",
+	// "alow:"), and a typo must never silently drop a protection.
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(&p); err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("parse policy: %s", friendlyYAMLError(err))
+	}
+	if err := p.validate(); err != nil {
+		return nil, err
 	}
 	for _, pat := range p.Shell.DenyPatterns {
 		re, err := regexp.Compile(pat)
@@ -175,6 +185,52 @@ func Parse(b []byte) (*Policy, error) {
 		p.approvalToolsSet[strings.ToLower(t)] = true
 	}
 	return &p, nil
+}
+
+var unknownFieldRe = regexp.MustCompile(`line (\d+): field (\S+) not found`)
+
+// friendlyYAMLError turns yaml.v3's Go-struct-flavoured messages into
+// something a person editing policy.yaml can act on.
+func friendlyYAMLError(err error) string {
+	msg := err.Error()
+	ms := unknownFieldRe.FindAllStringSubmatch(msg, -1)
+	if len(ms) == 0 {
+		return strings.TrimPrefix(msg, "yaml: ")
+	}
+	var parts []string
+	for i, m := range ms {
+		if i == 5 {
+			parts = append(parts, fmt.Sprintf("and %d more unknown keys", len(ms)-5))
+			break
+		}
+		parts = append(parts, fmt.Sprintf("unknown key %q on line %s", m[2], m[1]))
+	}
+	return strings.Join(parts, "; ") + " (a typo? known keys: version, shell{default,allow,deny_patterns}, egress{default,allow_hosts}, files{credential_adjacent}, deny_tools, approval_tools)"
+}
+
+// validate rejects values the engine would otherwise silently reinterpret.
+func (p *Policy) validate() error {
+	if p.Version != 1 {
+		return fmt.Errorf("parse policy: unsupported version %d (this warden reads \"version: 1\")", p.Version)
+	}
+	oneOf := func(field, v string, ok ...string) error {
+		if v == "" {
+			return nil
+		}
+		for _, o := range ok {
+			if v == o {
+				return nil
+			}
+		}
+		return fmt.Errorf("parse policy: %s: %q is not one of %s", field, v, strings.Join(ok, ", "))
+	}
+	if err := oneOf("shell.default", p.Shell.Default, "deny", "allow"); err != nil {
+		return err
+	}
+	if err := oneOf("egress.default", p.Egress.Default, "deny", "allow"); err != nil {
+		return err
+	}
+	return oneOf("files.credential_adjacent", p.Files.CredentialAdjacent, "require_approval", "deny", "allow")
 }
 
 // shellTools are the tool names treated as shell/exec.
@@ -271,6 +327,15 @@ func (e *Evaluator) evalTool(sp *model.Span, ver string) Result {
 			}
 		}
 	}
+	// 3b. Any other tool (MCP servers above all: a filesystem server reads
+	// and writes files without ever going through the file-tool hooks) gets
+	// its arguments scanned for the same paths: warden's own files are
+	// denied, credential stores need approval.
+	if !shellTools[tool] && sp.ArgsSummary != "" {
+		if r, hit := e.checkArgPaths(sp, ver); hit {
+			return r
+		}
+	}
 	// 4. Explicit approval gating beats the shell allowlist (explicit > default).
 	if e.policy.approvalToolsSet[tool] {
 		return Result{Decision: RequireApproval,
@@ -283,6 +348,53 @@ func (e *Evaluator) evalTool(sp *model.Span, ver string) Result {
 	}
 	return Result{Decision: Allow, Version: ver}
 }
+
+// looksLikePath keeps word-like tokens ("credentials", "secret") in tool
+// arguments from being mistaken for file paths.
+func looksLikePath(tok string) bool {
+	return strings.ContainsAny(tok, `/\`) || strings.HasPrefix(tok, "~") || strings.HasPrefix(tok, ".") ||
+		strings.HasPrefix(tok, "$") || strings.HasPrefix(tok, "%")
+}
+
+// checkArgPaths judges the path-like values in a non-shell tool's arguments.
+func (e *Evaluator) checkArgPaths(sp *model.Span, ver string) (Result, bool) {
+	args := sp.ArgsSummary
+	if len(args) > MaxAnalyzedCommand {
+		args = args[:MaxAnalyzedCommand]
+	}
+	for _, tok := range commandPaths(args) {
+		if !looksLikePath(tok) {
+			continue
+		}
+		if _, ok := e.policy.ProtectedPath(tok); ok {
+			return Result{Decision: Deny, Version: ver,
+				Reason: fmt.Sprintf("tool %q was given warden/harness control file %q: denied (an agent must not touch its own supervisor)", sp.Tool, replayClip(tok))}, true
+		}
+	}
+	frag, ok := redact.CredentialSubpathIn(args)
+	if !ok {
+		for _, tok := range commandPaths(args) {
+			if looksLikePath(tok) && redact.IsCredentialAdjacentPath(tok) {
+				frag, ok = tok, true
+				break
+			}
+		}
+	}
+	if !ok {
+		return Result{}, false
+	}
+	switch e.policy.Files.CredentialAdjacent {
+	case "deny":
+		return Result{Decision: Deny, Version: ver,
+			Reason: fmt.Sprintf("tool %q was given credential-adjacent path %q: denied by policy", sp.Tool, replayClip(frag))}, true
+	case "allow":
+		return Result{}, false
+	}
+	return Result{Decision: RequireApproval, Version: ver,
+		Reason: fmt.Sprintf("tool %q was given credential-adjacent path %q: requires human approval", sp.Tool, replayClip(frag))}, true
+}
+
+func replayClip(s string) string { return truncate(s, 120) }
 
 // MaxAnalyzedCommand is the longest shell command the policy will analyze.
 const MaxAnalyzedCommand = 256 << 10
@@ -548,6 +660,12 @@ func (e *Evaluator) binaryAllowed(ci CommandInfo) bool {
 // code. It is a best-effort list for the default allowlist, not a sandbox.
 func riskyInvocation(ci CommandInfo) string {
 	switch ci.Bin {
+	case "sort":
+		for _, a := range ci.Args {
+			if strings.HasPrefix(strings.ToLower(a), "--compress-program") {
+				return "sort --compress-program runs the program it is given"
+			}
+		}
 	case "git":
 		sub := ""
 		for i, a := range ci.Args {
@@ -574,6 +692,12 @@ func riskyInvocation(ci CommandInfo) string {
 		case "config", "filter-branch", "filter-repo", "bisect", "submodule", "difftool", "mergetool",
 			"daemon", "instaweb", "credential", "credential-store", "credential-cache", "alias", "hook":
 			return fmt.Sprintf("git %s can change git configuration or run arbitrary commands", sub)
+		case "grep":
+			for _, a := range ci.Args {
+				if a == "-O" || strings.HasPrefix(a, "-O") || strings.HasPrefix(strings.ToLower(a), "--open-files-in-pager") {
+					return "git grep -O / --open-files-in-pager runs the program it is given"
+				}
+			}
 		}
 	case "warden":
 		return "an agent may not run warden itself (it could approve its own requests)"
@@ -914,6 +1038,9 @@ func shellFields(s string) []string {
 // credentialPathInCommand scans a shell command for tokens that look like
 // credential-adjacent paths. Returns the first hit, or "".
 func credentialPathInCommand(cmd string) string {
+	if frag, ok := redact.CredentialSubpathIn(cmd); ok {
+		return frag
+	}
 	for _, tok := range commandPaths(cmd) {
 		if redact.IsCredentialAdjacentPath(tok) {
 			return tok
@@ -952,6 +1079,14 @@ func (e *Evaluator) evalFile(sp *model.Span, ver string) Result {
 				Reason:  fmt.Sprintf("%s access to %s control file %q denied: an agent must not touch its own supervisor", nonEmptyOp(sp.Op), kind, sp.Path),
 				Version: ver}
 		}
+	}
+	if n := strings.ToLower(sp.Name); (n == "grep" || n == "glob") && broadRoot(sp.Path) && e.policy.Files.CredentialAdjacent != "allow" {
+		// A search that walks a whole home directory reads every credential
+		// file in it and returns the matching lines.
+		if e.policy.Files.CredentialAdjacent == "deny" {
+			return Result{Decision: Deny, Version: ver, Reason: fmt.Sprintf("%s over %q would read credential files: denied (search a project directory)", sp.Name, sp.Path)}
+		}
+		return Result{Decision: RequireApproval, Version: ver, Reason: fmt.Sprintf("%s over %q would read credential files: requires human approval (search a project directory)", sp.Name, sp.Path)}
 	}
 	if !redact.IsCredentialAdjacentPath(sp.Path) {
 		return Result{Decision: Allow, Version: ver}

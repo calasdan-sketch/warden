@@ -123,3 +123,50 @@ func TestStepRange(t *testing.T) {
 		t.Error("out of range must error")
 	}
 }
+
+// Build used to re-sort the whole set of touched files on every step, so a
+// 20,000-step run took minutes. It must stay close to linear.
+func TestBuildLongRunIsFast(t *testing.T) {
+	t0 := time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)
+	run := &model.Run{RunID: "r", StartedAt: t0}
+	var spans []*model.Span
+	for i := 0; i < 60000; i++ {
+		spans = append(spans, &model.Span{SpanID: strings.Repeat("x", 1) + string(rune(i%90+33)), RunID: "r", Kind: model.SpanFileOp,
+			Path: "/tmp/f" + strings.Repeat("z", i%7) + string(rune('a'+i%26)) + time.Duration(i).String(), Op: "read", StartedAt: t0.Add(time.Duration(i) * time.Millisecond)})
+	}
+	start := time.Now()
+	s := Build(run, spans, Integrity{Status: "verified"})
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("Build of 60000 steps took %v; it must be near-linear", d)
+	}
+	last := s.Steps[len(s.Steps)-1].State
+	if last.FilesN < 50000 || len(last.Files) != topN+1 || !strings.HasPrefix(last.Files[topN], "… +") {
+		t.Errorf("last step state wrong: n=%d len=%d", last.FilesN, len(last.Files))
+	}
+	if s.Steps[100].State.Files != nil {
+		t.Error("long runs must not carry per-step lists")
+	}
+	// ... but any step's lists are still available on demand, and sorted.
+	st := s.StateAt(500)
+	if st.FilesN != s.Steps[499].State.FilesN || len(st.Files) != topN+1 {
+		t.Errorf("StateAt(500): n=%d len=%d", st.FilesN, len(st.Files))
+	}
+	for i := 1; i < topN; i++ {
+		if st.Files[i-1] > st.Files[i] {
+			t.Fatal("StateAt list not sorted")
+		}
+	}
+	var b bytes.Buffer
+	if err := s.Step(&b, 500); err != nil || !strings.Contains(b.String(), "files touched (") {
+		t.Errorf("Step output: %v %q", err, b.String()[:80])
+	}
+}
+
+func TestShortRunKeepsPerStepLists(t *testing.T) {
+	run, spans := fixture()
+	s := Build(run, spans, Integrity{Status: "verified"})
+	st := s.Steps[3].State
+	if len(st.Files) != 1 || st.FilesN != 1 || s.StateAt(4).Files[0] != "/tmp/x" {
+		t.Errorf("short run state: %+v", st)
+	}
+}

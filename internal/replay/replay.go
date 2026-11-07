@@ -40,15 +40,68 @@ type Step struct {
 
 // State is the cumulative picture after a step.
 type State struct {
-	ToolCalls int64    `json:"tool_calls"`
-	Denied    int64    `json:"denied"`
-	Asked     int64    `json:"asked"`
-	TokensIn  int64    `json:"tokens_in"`
-	TokensOut int64    `json:"tokens_out"`
-	CostUSD   float64  `json:"cost_usd"`
-	Files     []string `json:"files_touched"`
-	Hosts     []string `json:"hosts_contacted"`
-	Tools     []string `json:"tools_used"`
+	ToolCalls int64   `json:"tool_calls"`
+	Denied    int64   `json:"denied"`
+	Asked     int64   `json:"asked"`
+	TokensIn  int64   `json:"tokens_in"`
+	TokensOut int64   `json:"tokens_out"`
+	CostUSD   float64 `json:"cost_usd"`
+	// Distinct counts are always present. The lists (first 50, sorted) are
+	// kept on every step of a run up to ListStepsMax steps; on longer runs
+	// they are kept on the last step only, because per-step copies of the
+	// sets would make the output grow with the square of the run. Use
+	// Session.StateAt(n) to get them for any step.
+	FilesN int      `json:"files_count"`
+	HostsN int      `json:"hosts_count"`
+	ToolsN int      `json:"tools_count"`
+	Files  []string `json:"files_touched,omitempty"`
+	Hosts  []string `json:"hosts_contacted,omitempty"`
+	Tools  []string `json:"tools_used,omitempty"`
+}
+
+// ListStepsMax is the longest run whose every step carries the touched
+// files, hosts and tools lists.
+const ListStepsMax = 2000
+
+// topSet is a set that remembers its 50 smallest cleaned members, so the
+// state after each step costs O(50) instead of re-sorting the whole set.
+type topSet struct {
+	seen map[string]bool
+	top  []string
+}
+
+const topN = 50
+
+func (t *topSet) add(raw string) {
+	if t.seen == nil {
+		t.seen = map[string]bool{}
+	}
+	if t.seen[raw] {
+		return
+	}
+	t.seen[raw] = true
+	c := Clean(raw, 120)
+	if len(t.top) >= topN && c >= t.top[len(t.top)-1] {
+		return
+	}
+	i := sort.SearchStrings(t.top, c)
+	t.top = append(t.top, "")
+	copy(t.top[i+1:], t.top[i:])
+	t.top[i] = c
+	if len(t.top) > topN {
+		t.top = t.top[:topN]
+	}
+}
+
+func (t *topSet) n() int { return len(t.seen) }
+
+// list returns a copy of the first 50 members plus a "+N more" marker.
+func (t *topSet) list() []string {
+	out := append([]string(nil), t.top...)
+	if n := len(t.seen); n > len(t.top) {
+		out = append(out, fmt.Sprintf("… +%d more", n-len(t.top)))
+	}
+	return out
 }
 
 // WhatIfResult is the candidate policy's verdict on a recorded call.
@@ -65,6 +118,38 @@ type Session struct {
 	Integrity Integrity  `json:"integrity"`
 	Steps     []*Step    `json:"steps"`
 	WhatIf    *Summary   `json:"what_if,omitempty"`
+}
+
+// StateAt returns the full state (with the files, hosts and tools lists)
+// after step n (1-based), whatever the run length.
+func (s *Session) StateAt(n int) State {
+	if n < 1 || n > len(s.Steps) {
+		return State{}
+	}
+	st := s.Steps[n-1].State
+	if st.Files != nil || (st.FilesN+st.HostsN+st.ToolsN == 0) {
+		return st
+	}
+	var files, hosts, tools topSet
+	for _, step := range s.Steps[:n] {
+		sp := step.Span
+		switch sp.Kind {
+		case model.SpanToolCall:
+			if sp.Tool != "" {
+				tools.add(sp.Tool)
+			}
+		case model.SpanFileOp:
+			if sp.Path != "" {
+				files.add(sp.Path)
+			}
+		case model.SpanNetEgress:
+			if sp.Host != "" {
+				hosts.add(sp.Host)
+			}
+		}
+	}
+	st.Files, st.Hosts, st.Tools = files.list(), hosts.list(), tools.list()
+	return st
 }
 
 // Summary totals a counterfactual.
@@ -162,7 +247,7 @@ func Build(run *model.Run, spans []*model.Span, in Integrity) *Session {
 	in.Detail = redact.Sanitize(in.Detail)
 	s := &Session{Run: run, Integrity: in}
 	var st State
-	files, hosts, tools := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	var files, hosts, tools topSet
 	for i, sp := range sorted {
 		c := *sp
 		for _, f := range []*string{&c.Name, &c.AgentID, &c.FleetID, &c.Model, &c.Tool, &c.ToolServer, &c.ArgsSummary, &c.ToolCallID,
@@ -176,15 +261,15 @@ func Build(run *model.Run, spans []*model.Span, in Integrity) *Session {
 		case model.SpanToolCall:
 			st.ToolCalls++
 			if sp.Tool != "" {
-				tools[sp.Tool] = true
+				tools.add(sp.Tool)
 			}
 		case model.SpanFileOp:
 			if sp.Path != "" {
-				files[sp.Path] = true
+				files.add(sp.Path)
 			}
 		case model.SpanNetEgress:
 			if sp.Host != "" {
-				hosts[sp.Host] = true
+				hosts.add(sp.Host)
 			}
 		case model.SpanLLMCall:
 			st.TokensIn += sp.TokensIn
@@ -198,25 +283,16 @@ func Build(run *model.Run, spans []*model.Span, in Integrity) *Session {
 			st.Asked++
 		}
 		cur := st
-		cur.Files, cur.Hosts, cur.Tools = keys(files), keys(hosts), keys(tools)
+		cur.FilesN, cur.HostsN, cur.ToolsN = files.n(), hosts.n(), tools.n()
+		if len(sorted) <= ListStepsMax || i == len(sorted)-1 {
+			cur.Files, cur.Hosts, cur.Tools = files.list(), hosts.list(), tools.list()
+		}
 		s.Steps = append(s.Steps, &Step{
 			N: i + 1, OffsetMs: sp.StartedAt.Sub(start).Milliseconds(), Span: sp,
 			What: Clean(describe(sp), 200), Verdict: v, State: cur,
 		})
 	}
 	return s
-}
-
-func keys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, Clean(k, 120))
-	}
-	sort.Strings(out)
-	if len(out) > 50 {
-		out = append(out[:50], fmt.Sprintf("… +%d more", len(m)-50))
-	}
-	return out
 }
 
 // notPure reports recorded decisions that came from live operator state, not
