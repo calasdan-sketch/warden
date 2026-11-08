@@ -258,7 +258,7 @@ func Verify(rec *model.Receipt, body string, pub ed25519.PublicKey) error {
 	if hex.EncodeToString(sum[:]) != rec.BodyHash {
 		return fmt.Errorf("body hash mismatch: receipt was modified after sealing")
 	}
-	sig, err := base64.StdEncoding.DecodeString(rec.Signature)
+	sig, err := base64.StdEncoding.Strict().DecodeString(rec.Signature)
 	if err != nil {
 		return fmt.Errorf("bad signature encoding: %w", err)
 	}
@@ -297,8 +297,11 @@ func (s *Signer) SignStatement(domain string, msg []byte) string {
 }
 
 // VerifyStatement checks a SignStatement signature.
+// Signatures must be written exactly as warden writes them: non-canonical
+// base64 (stray bits in the padding) decodes to the same bytes, but a copy
+// that differs from the original is not accepted as the original.
 func VerifyStatement(pub ed25519.PublicKey, domain string, msg []byte, sigB64 string) bool {
-	sig, err := base64.StdEncoding.DecodeString(sigB64)
+	sig, err := base64.StdEncoding.Strict().DecodeString(sigB64)
 	if err != nil {
 		return false
 	}
@@ -316,6 +319,7 @@ func MatchesBody(rec *model.Receipt, body string) error {
 	if err := json.Unmarshal([]byte(body), &b); err != nil {
 		return fmt.Errorf("receipt body not canonical JSON: %w", err)
 	}
+	legacy := IsBlankLegacyHeader(rec)
 	var bad []string
 	cmp := func(field string, ok bool) {
 		if !ok {
@@ -336,31 +340,50 @@ func MatchesBody(rec *model.Receipt, body string) error {
 		return *p
 	}
 	cmp("run_id", rec.RunID == b.RunID)
-	cmp("agent_id", rec.AgentID == b.AgentID)
-	cmp("fleet_id", rec.FleetID == b.FleetID)
-	cmp("operator", rec.Operator == b.Operator)
 	cmp("status", string(rec.Status) == b.Status)
-	cmp("started_at", timeEq(b.StartedAt, rec.StartedAt))
+	if !legacy {
+		cmp("agent_id", rec.AgentID == b.AgentID)
+		cmp("fleet_id", rec.FleetID == b.FleetID)
+		cmp("operator", rec.Operator == b.Operator)
+		cmp("started_at", timeEq(b.StartedAt, rec.StartedAt))
+	}
 	cmp("sealed_at", timeEq(b.SealedAt, rec.SealedAt))
 	cmp("tokens_in", rec.TokensIn == b.TokensIn)
 	cmp("tokens_out", rec.TokensOut == b.TokensOut)
 	cmp("tokens_cached", rec.TokensCached == b.TokensCached)
 	cmp("cost_usd", rec.CostUSD == b.CostUSD)
-	cmp("tool_calls", rec.ToolCalls == b.ToolCalls)
+	if !legacy {
+		cmp("tool_calls", rec.ToolCalls == b.ToolCalls)
+	}
 	cmp("kill_reason", deref(rec.KillReason) == b.KillReason)
 	cmp("killed_by", deref(rec.KilledBy) == b.KilledBy)
 	cmp("prev_hash", rec.PrevHash == b.PrevHash)
-	cmp("span_count", rec.SpanCount == b.SpanCount)
-	cmp("spans_digest", rec.SpansDigest == b.SpansDigest)
+	if !legacy {
+		cmp("span_count", rec.SpanCount == b.SpanCount)
+		cmp("spans_digest", rec.SpansDigest == b.SpansDigest)
+	}
 	guardsEq := len(rec.GuardsEvaluated) == len(b.Guards)
 	for i := 0; guardsEq && i < len(b.Guards); i++ {
 		guardsEq = rec.GuardsEvaluated[i] == b.Guards[i]
 	}
-	cmp("guards_evaluated", guardsEq)
+	cmp("guards_evaluated", guardsEq || legacy)
 	if len(bad) > 0 {
 		return fmt.Errorf("receipt header field(s) %s differ from the signed body: header was edited", strings.Join(bad, ", "))
 	}
 	return nil
+}
+
+// IsBlankLegacyHeader reports whether a receipt header has the shape that
+// warden 0.1.0 exports wrote: the display fields that come from the signed
+// body (agent, fleet, operator, start time, call count, trace digest) were all
+// left empty. That is a missing display field, not an edited one: the signed
+// body still carries the truth, and the status, totals, kill fields and chain
+// link are still compared. Anything with even one of those fields filled in is
+// held to the full comparison, so blanking some fields to hide an edit fails.
+func IsBlankLegacyHeader(rec *model.Receipt) bool {
+	return rec.AgentID == "" && rec.FleetID == "" && rec.Operator == "" &&
+		rec.StartedAt.IsZero() && rec.ToolCalls == 0 &&
+		rec.SpanCount == 0 && rec.SpansDigest == "" && len(rec.GuardsEvaluated) == 0
 }
 
 // FillFromBody populates a receipt header's display fields from its signed

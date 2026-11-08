@@ -1,0 +1,190 @@
+{
+  "run": {
+    "run_id": "run1",
+    "agent_id": "a",
+    "fleet_id": "f",
+    "started_at": "2026-11-07T10:00:00Z",
+    "status": "completed",
+    "tokens_in": 0,
+    "tokens_out": 0,
+    "tokens_cached": 0,
+    "cost_usd": 0,
+    "cost_saved_usd": 0,
+    "cost_source": "",
+    "tool_calls": 0,
+    "files_touched": 0,
+    "net_egress_hosts": 0,
+    "subagents_spawned": 0,
+    "approvals_requested": 0,
+    "approvals_denied": 0
+  },
+  "integrity": {
+    "status": "verified",
+    "detail": "receipt signature and signed trace digest match",
+    "covered_spans": 5,
+    "late_spans": 0
+  },
+  "steps": [
+    {
+      "n": 1,
+      "offset_ms": 0,
+      "span": {
+        "span_id": "a",
+        "run_id": "run1",
+        "kind": "llm.call",
+        "agent_id": "",
+        "fleet_id": "",
+        "started_at": "2026-11-07T10:00:00Z",
+        "model": "m",
+        "tokens_in": 10,
+        "tokens_out": 5,
+        "cost_usd": 0.01
+      },
+      "what": "m in=10 out=5 $0.0100",
+      "verdict": "ok",
+      "state": {
+        "tool_calls": 0,
+        "denied": 0,
+        "asked": 0,
+        "tokens_in": 10,
+        "tokens_out": 5,
+        "cost_usd": 0.01,
+        "files_count": 0,
+        "hosts_count": 0,
+        "tools_count": 0
+      }
+    },
+    {
+      "n": 2,
+      "offset_ms": 1000,
+      "span": {
+        "span_id": "b",
+        "run_id": "run1",
+        "kind": "tool.call",
+        "agent_id": "",
+        "fleet_id": "",
+        "started_at": "2026-11-07T10:00:01Z",
+        "tool": "bash",
+        "args_summary": "git status",
+        "policy_decision": "allow"
+      },
+      "what": "bash: git status",
+      "verdict": "allow",
+      "state": {
+        "tool_calls": 1,
+        "denied": 0,
+        "asked": 0,
+        "tokens_in": 10,
+        "tokens_out": 5,
+        "cost_usd": 0.01,
+        "files_count": 0,
+        "hosts_count": 0,
+        "tools_count": 1,
+        "tools_used": [
+          "bash"
+        ]
+      }
+    },
+    {
+      "n": 3,
+      "offset_ms": 2000,
+      "span": {
+        "span_id": "c",
+        "run_id": "run1",
+        "kind": "tool.call",
+        "agent_id": "",
+        "fleet_id": "",
+        "started_at": "2026-11-07T10:00:02Z",
+        "tool": "bash",
+        "args_summary": "rm -rf /",
+        "policy_decision": "deny",
+        "policy_reason": "denied by pattern"
+      },
+      "what": "bash: rm -rf /",
+      "verdict": "deny",
+      "state": {
+        "tool_calls": 2,
+        "denied": 1,
+        "asked": 0,
+        "tokens_in": 10,
+        "tokens_out": 5,
+        "cost_usd": 0.01,
+        "files_count": 0,
+        "hosts_count": 0,
+        "tools_count": 1,
+        "tools_used": [
+          "bash"
+        ]
+      }
+    },
+    {
+      "n": 4,
+      "offset_ms": 3000,
+      "span": {
+        "span_id": "d",
+        "run_id": "run1",
+        "kind": "file.op",
+        "agent_id": "",
+        "fleet_id": "",
+        "started_at": "2026-11-07T10:00:03Z",
+        "path": "/tmp/x",
+        "op": "write"
+      },
+      "what": "write /tmp/x",
+      "verdict": "ok",
+      "state": {
+        "tool_calls": 2,
+        "denied": 1,
+        "asked": 0,
+        "tokens_in": 10,
+        "tokens_out": 5,
+        "cost_usd": 0.01,
+        "files_count": 1,
+        "hosts_count": 0,
+        "tools_count": 1,
+        "files_touched": [
+          "/tmp/x"
+        ],
+        "tools_used": [
+          "bash"
+        ]
+      }
+    },
+    {
+      "n": 5,
+      "offset_ms": 4000,
+      "span": {
+        "span_id": "e",
+        "run_id": "run1",
+        "kind": "net.egress",
+        "agent_id": "",
+        "fleet_id": "",
+        "started_at": "2026-11-07T10:00:04Z",
+        "host": "example.com",
+        "port": 443
+      },
+      "what": "egress example.com:443",
+      "verdict": "ok",
+      "state": {
+        "tool_calls": 2,
+        "denied": 1,
+        "asked": 0,
+        "tokens_in": 10,
+        "tokens_out": 5,
+        "cost_usd": 0.01,
+        "files_count": 1,
+        "hosts_count": 1,
+        "tools_count": 1,
+        "files_touched": [
+          "/tmp/x"
+        ],
+        "hosts_contacted": [
+          "example.com"
+        ],
+        "tools_used": [
+          "bash"
+        ]
+      }
+    }
+  ]
+}

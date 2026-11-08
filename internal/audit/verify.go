@@ -64,6 +64,9 @@ func Verify(items []Item, pub ed25519.PublicKey) *Report {
 			continue
 		}
 		if it.FullHeader {
+			if receipt.IsBlankLegacyHeader(it.Receipt) {
+				rep.Notes = append(rep.Notes, fmt.Sprintf("%s: the receipt header leaves agent, fleet, start time and call count blank, as warden 0.1.0 exports did; the signed body was checked instead", it.Receipt.RunID))
+			}
 			if err := receipt.MatchesBody(it.Receipt, it.Body); err != nil {
 				rep.Problems = append(rep.Problems, fmt.Sprintf("%s: %v", it.Receipt.RunID, err))
 				continue

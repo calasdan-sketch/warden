@@ -1,0 +1,17 @@
+step 3 of 5  (+2.0s)  tool.call  verdict=DENY
+integrity: VERIFIED
+what:      bash: rm -rf /
+policy:    deny denied by pattern
+
+state after this step
+  tool calls 2, denied 1, asked 0
+  tokens in/out 10/5, cost $0.0100
+  tools used (1): bash
+  files touched (0): 
+  hosts contacted (0): 
+
+context
+    1 +0.0s llm.call     ok    m in=10 out=5 $0.0100
+    2 +1.0s tool.call    allow bash: git status
+>   3 +2.0s tool.call    DENY  bash: rm -rf /
+    4 +3.0s file.op      ok    write /tmp/x

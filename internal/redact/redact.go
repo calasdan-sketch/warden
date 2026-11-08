@@ -112,6 +112,11 @@ func init() {
 	vendorRules = len(rules)
 
 	// --- Credentials embedded in text.
+	// Bearer tokens anywhere. This runs before every rule that masks "the
+	// value after a key": for "TOKEN=Bearer abc..." or "X-Api-Key: Bearer abc"
+	// those would otherwise mask only the word "Bearer" and leave the real
+	// token in the clear.
+	addKeep("bearer_token", `(?i)(bearer\s+)([A-Za-z0-9\-._~+/]+=*)`, "${1}[redacted]", nil)
 	// user:password@ in any URL scheme (postgres, mysql, mongodb+srv, redis,
 	// amqp, ftp, https, ...). The user name is kept; the password is masked.
 	addKeep("url_credentials", `(?i)\b([a-z][a-z0-9+.-]{1,20}://[^:/\s@]*:)[^@\s/]+@`, "${1}[redacted]@", nil)
@@ -135,8 +140,6 @@ func init() {
 	addKeep("kv_secret_value",
 		`(?i)\b([A-Za-z0-9_.-]*(?:api[_-]?key|apikey|secret|passw(?:or)?d|passwd|pwd|token|credential|private[_-]?key|auth[_-]?key|access[_-]?key|signing[_-]?key)[A-Za-z0-9_.-]*)(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"'&;,)}\]]+)`,
 		"${1}${2}[redacted]", notCounter)
-	// Bearer tokens anywhere.
-	addKeep("bearer_token", `(?i)(bearer\s+)([A-Za-z0-9\-._~+/]+=*)`, "${1}[redacted]", nil)
 }
 
 // invisible reports characters that must not survive into an audit trail:

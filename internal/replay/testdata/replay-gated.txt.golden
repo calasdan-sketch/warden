@@ -1,0 +1,6 @@
+run run1  agent=a fleet=f  status=completed
+started 2026-11-07 10:00:00Z  duration 4s  calls=0 cost=$0.0000
+integrity: VERIFIED - receipt signature and signed trace digest match
+
+#  +t     kind       what            verdict
+3  +2.0s  tool.call  bash: rm -rf /  DENY

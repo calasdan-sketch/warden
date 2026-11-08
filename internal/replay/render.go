@@ -73,7 +73,11 @@ func (s *Session) Step(w io.Writer, n int) error {
 	}
 	fmt.Fprintf(w, "what:      %s\n", st.What)
 	if sp.PolicyDecision != "" {
-		fmt.Fprintf(w, "policy:    %s (v%s) %s\n", sp.PolicyDecision, Clean(sp.PolicyVersion, 10), Clean(sp.PolicyReason, 300))
+		ver := ""
+		if sp.PolicyVersion != "" {
+			ver = " (v" + Clean(sp.PolicyVersion, 10) + ")"
+		}
+		fmt.Fprintf(w, "policy:    %s%s %s\n", sp.PolicyDecision, ver, Clean(sp.PolicyReason, 300))
 	}
 	if sp.ToolCallID != "" {
 		fmt.Fprintf(w, "call id:   %s\n", Clean(sp.ToolCallID, 80))

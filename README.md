@@ -11,7 +11,7 @@ can stop a run, an agent, a fleet or a tool from the CLI or the dashboard.
 warden demo        # 60-second tour in a temp dir: no network, no API keys, nothing else touched
 ```
 
-> **Status: pre-1.0 (0.2.0, unreleased).** The npm package `@decnutz/warden@0.0.1`
+> **Status: pre-1.0 (0.2.0, unreleased; maintained by Calas Automations Inc.).** The npm package `@decnutz/warden@0.0.1`
 > is an empty placeholder. 0.2.0 is the first build intended to ship binaries. See
 > [Path to 1.0](#path-to-10) for what is stable and what may still change.
 
@@ -264,7 +264,7 @@ stack was not run here, so its footprint is **unverified**).
 
 | | install time | size on disk | packages | what you get |
 |---|---|---|---|---|
-| **warden 0.2.0** | copy one file | **12.3 MB** (Linux, stripped; 12.4 MB Windows) | 0 dependencies | recorder + gate + kill + dashboard + CLI |
+| **warden 0.2.0** | copy one file | **12.4 MB** (Linux, stripped; Windows similar) | 0 dependencies | recorder + gate + kill + dashboard + CLI |
 | [aileron 0.1.6](https://pypi.org/project/aileron/) | 1 s | 32 MB | 8 | hash-chained log, checkpoints, HTML report, MCP proxy |
 | [langfuse](https://pypi.org/project/langfuse/) (SDK) | 4 s | 37 MB | 31 | tracing SDK |
 | [agentops](https://pypi.org/project/agentops/) | 4 s | 41 MB | 39 | tracing SDK |
@@ -332,7 +332,7 @@ a case that breaks us.
 | `gate --tool T --args "…"` | Ask the policy engine directly. Exit 0 = allow, 3 = deny, 4 = require_approval. `--await` blocks until a human decides. |
 | `kill --scope run\|agent\|fleet\|tool --target X --reason "…"` | Kill switch. Run: SIGTERM → 10 s grace → SIGKILL on the whole process group, sealed `killed_operator`. Agent: quarantine (`--ttl`). Fleet: freeze. Tool: deny-list. A reason is required; every action is audited. |
 | `approve --id N --decision approved\|denied` / `approvals` | Decide or list pending human approvals. |
-| `dashboard [--listen 127.0.0.1:8420] [--budget 500]` | Web UI: burn bar, run table with per-row kill, anomaly feed, approvals, trace waterfall with the sealed receipt. Bearer-token RBAC with `WARDEN_TOKENS=secret=role,…` (viewer < operator < admin). |
+| `dashboard [--listen 127.0.0.1:8420] [--budget 500]` | Web UI: burn bar, run table with per-row kill, anomaly feed, approvals, trace waterfall with the sealed receipt. Bearer-token RBAC with `WARDEN_TOKENS=secret=role,…` (viewer < operator < admin). Refuses a network address (`0.0.0.0`, `:8420`, a LAN IP) with no tokens (exit 2; `--insecure-no-auth` overrides). On loopback it answers only to `localhost` / `127.0.0.1` / `::1` and refuses cross-site posts. |
 | `verify [--run ID] [--pubkey K] [--anchors FILE]` / `verify --bundle F --pubkey K [--allow-unsigned] [--anchors FILE]` | Verify receipts, the chain and signed traces in the store, or in an exported bundle with no data dir. |
 | `export [--format jsonl\|otlp] [--out FILE] [--endpoint URL --header "K: V"]` | Verifiable JSONL audit bundle (written 0600), OTLP/HTTP JSON, or a direct OTLP push. |
 | `scan` | Run the 12 anomaly rules over live runs and print new alerts. |
@@ -345,6 +345,7 @@ a case that breaks us.
 | `bench [--n N]` | Measure hook latency, policy, redaction and replay cost on this machine. |
 | `report --from shortleash\|planok\|mcp-jail\|calas-gateway --file X [--watch]` | Ingest a sibling tool's JSONL feed. |
 | `version` | Build info. |
+| `about` | Version, maintainer (Calas Automations Inc.) and license. |
 
 ## Policy file
 
@@ -536,8 +537,27 @@ agent run as the **same OS user**, which sets hard limits:
 - **Deterministic anomaly rules can be ramped around.** A patient adversary
   that increases spend slowly will not trip the velocity rules.
 - **Dashboard tokens** travel in `Authorization: Bearer` headers. SSE also
-  accepts `?token=`. Rotate tokens. With no tokens configured, keep the
-  dashboard on localhost.
+  accepts `?token=`. Rotate tokens. With no tokens configured, warden only
+  serves the dashboard on a loopback address. It also refuses requests whose
+  `Host` is not a loopback name (a web page cannot rebind its own name to
+  127.0.0.1 to reach the kill and approval buttons) and state-changing requests
+  that carry a foreign `Origin` (a form on another site cannot press them).
+
+## Upgrading from an earlier build
+
+Data written by 0.1.0, 0.1.x and the first 0.2.0 build opens in this one: `verify`, `replay`,
+`runs`, `summary` and `doctor` were run on real data dirs from each. Three things to know:
+
+- Your `policy.yaml` is never overwritten, so an older install keeps its older default
+  allowlist (0.1.0 allowed `npm`, `node` and `python3`, which run any code). Run
+  `warden doctor` or `warden policy check`: they print a warning per risky entry.
+- An audit bundle exported by 0.1.0 left agent, fleet and start time blank in each receipt
+  header. Older builds' `verify --bundle` accepted that; round 3's strict check called it
+  "header was edited". It now verifies, with a note, because the signed body still carries
+  those fields. Status, totals, kill fields and the chain link are still compared, and a header
+  that is only partly blank is still rejected.
+- Signatures must be written exactly as warden writes them. A bundle whose signature text was
+  re-encoded (extra bits in the base64 padding) is rejected.
 
 ## Honest limits
 
@@ -579,9 +599,13 @@ Go binary through `optionalDependencies` (the esbuild pattern):
 scripts/build-npm.sh     # cross-compiles, writes npm/dist/*, runs a launcher smoke test, npm pack
 ```
 
-To release, publish the four platform packages first, then the launcher.
-Versions must match: the script checks `package.json` against
-`cmd/warden/main.go`.
+To release, publish all six platform packages first, then the launcher (the
+exact commands are in `PUBLISH-CHECKLIST.md`). Versions must match: the script
+checks `package.json` against `cmd/warden/main.go`, and a test pins every
+version, the maintainer name and the public-access setting scoped packages need.
+
+The unscoped names `warden` on npm and PyPI belong to other projects, which is why
+the package is `@decnutz/warden`. The binary is still called `warden`.
 
 ## License
 

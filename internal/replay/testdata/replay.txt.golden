@@ -1,0 +1,10 @@
+run run1  agent=a fleet=f  status=completed
+started 2026-11-07 10:00:00Z  duration 4s  calls=0 cost=$0.0000
+integrity: VERIFIED - receipt signature and signed trace digest match
+
+#  +t     kind        what                    verdict
+1  +0.0s  llm.call    m in=10 out=5 $0.0100   ok
+2  +1.0s  tool.call   bash: git status        allow
+3  +2.0s  tool.call   bash: rm -rf /          DENY
+4  +3.0s  file.op     write /tmp/x            ok
+5  +4.0s  net.egress  egress example.com:443  ok

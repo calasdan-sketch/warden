@@ -9,7 +9,8 @@
 #   npm/dist/warden-<os>-<cpu>/       @decnutz/warden-<os>-<cpu> (one binary each)
 # then runs `npm pack` on each so the tarballs can be inspected.
 #
-# Release (by a maintainer, by hand): publish every platform package FIRST,
+# Release (by a maintainer, by hand): publish every platform package FIRST
+# (all six; see PUBLISH-CHECKLIST.md),
 # then the launcher package — the launcher's optionalDependencies pin the
 # exact same version.
 set -euo pipefail
@@ -42,8 +43,12 @@ for p in $PLATFORMS; do
   "name": "@decnutz/warden-$p",
   "version": "$VERSION",
   "description": "warden binary for $os/$cpu (installed automatically by @decnutz/warden)",
+  "author": "Calas Automations Inc.",
   "license": "MIT",
+  "homepage": "https://github.com/calasdan-sketch/warden#readme",
   "repository": { "type": "git", "url": "git+https://github.com/calasdan-sketch/warden.git" },
+  "bugs": { "url": "https://github.com/calasdan-sketch/warden/issues" },
+  "publishConfig": { "access": "public" },
   "os": ["$os"],
   "cpu": ["$cpu"],
   "files": ["bin/$exe"],

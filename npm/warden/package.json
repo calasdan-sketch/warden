@@ -4,6 +4,9 @@
   "description": "Enterprise agent flight recorder — runtime supervisor for AI agent fleets. Audit everything, live fleet view, one-tap kill switch.",
   "author": "Calas Automations Inc.",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "homepage": "https://github.com/calasdan-sketch/warden#readme",
   "repository": {
     "type": "git",

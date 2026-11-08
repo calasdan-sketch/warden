@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/calasdan-sketch/warden/internal/collect"
@@ -210,6 +211,17 @@ func (a *app) sealSession(harness, sessionID string, opts collect.RunOptions) in
 	return 0
 }
 
+// transientInstall reports whether a binary path is in a place that does not
+// last: an npx cache folder or the system temp directory.
+func transientInstall(p string) bool {
+	q := strings.ReplaceAll(filepath.ToSlash(p), `\`, "/")
+	if strings.Contains(q, "/_npx/") {
+		return true
+	}
+	tmp := filepath.ToSlash(filepath.Clean(os.TempDir()))
+	return tmp != "" && tmp != "/" && strings.HasPrefix(q, tmp+"/")
+}
+
 // printHookConfig prints a ready-to-paste hook configuration.
 func printHookConfig(harness string, extra []string) {
 	bin := "warden"
@@ -217,6 +229,11 @@ func printHookConfig(harness string, extra []string) {
 		if self, err := os.Executable(); err == nil {
 			bin, _ = filepath.Abs(self)
 		}
+	}
+	if transientInstall(bin) {
+		fmt.Fprintf(os.Stderr, "WARNING: this warden lives in a temporary folder (%s), for example the cache npx uses.\n"+
+			"A hook that points there stops working when the folder is cleaned, and Claude Code and Codex then let tool calls through.\n"+
+			"Install warden permanently first (npm install -g @decnutz/warden, or go install github.com/calasdan-sketch/warden/cmd/warden@latest), then run this again.\n", bin)
 	}
 	cmd := hook.ShellQuote(bin) + " hook " + harness
 	for _, e := range extra {

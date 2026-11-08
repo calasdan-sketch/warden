@@ -35,6 +35,10 @@ import (
 // version is overridden at release build time: -ldflags "-X main.version=..."
 var version = "0.2.0"
 
+// maintainer is the author/maintainer name used in every place warden names
+// one (about text, package metadata, license). release_test.go pins it.
+const maintainer = "Calas Automations Inc."
+
 // gatingCommands are the commands that enforce policy and so need a valid one.
 var gatingCommands = map[string]bool{"wrap": true, "gate": true, "dashboard": true, "serve": true, "report": true, "span": true}
 
@@ -151,6 +155,9 @@ func main() {
 	switch cmd {
 	case "version", "--version", "-v":
 		fmt.Println("warden", version)
+		return
+	case "about":
+		fmt.Printf("warden %s\nA flight recorder and kill switch for AI agents.\nMaintained by %s\nLicense: MIT\n", version, maintainer)
 		return
 	case "help", "--help", "-h":
 		usage()
@@ -280,6 +287,7 @@ Usage: warden [--dir DIR] [--policy FILE] <command> [flags]
   init                    Initialize the data dir (policy template + signing key)
   bench [--n N]           Measure hook latency, policy and redaction cost on this machine
   version                 Print version
+  about                   Version, maintainer and license
 
 Global flags: --dir DIR (default ~/.warden, or $WARDEN_DIR), --policy FILE
 `)

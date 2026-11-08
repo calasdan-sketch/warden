@@ -6,6 +6,46 @@ Expert deep-dive round 2: found by testing warden the way a platform team, a
 security reviewer and an incident responder would. Everything below has a test; the
 two corpora and `warden bench` are committed so the numbers can be re-run.
 
+### Round 5 (2026-11-08): maintainer, upgrade path, browser attacks, property and differential tests
+Maintainer name everywhere is now exactly "Calas Automations Inc." (LICENSE, npm metadata of the
+launcher and of every platform package, `warden about`); tests pin it. `docs/ROUND5.md` has the
+findings, the commands that proved them and the scored idea list.
+
+#### Fixed
+- **A web page could press the dashboard's kill and approval buttons.** With no tokens set, the
+  dashboard trusted any request that reached 127.0.0.1. A page on another site could (a) rebind its
+  own name to 127.0.0.1 and read traces, or (b) send a cross-site form post to `/api/v1/kill`,
+  `/api/v1/approvals/N` and the other write endpoints. Requests with a non-loopback `Host` are now
+  refused when the dashboard is on loopback, and a state-changing request with a foreign `Origin`
+  (or `Sec-Fetch-Site: cross-site`) is refused in every mode. curl and scripts send neither header
+  and are unaffected.
+- **`dashboard --listen 0.0.0.0:8420` with no tokens served the kill buttons to the network** while
+  printing "localhost only". It now exits 2 and says what to do; `--insecure-no-auth` overrides.
+- **A token after `Bearer` leaked in key/value text.** `TOKEN=Bearer abc...` and `X-Api-Key: Bearer
+  abc...` masked only the word "Bearer" and stored the token. The bearer rule now runs first.
+  Found by the new property test.
+- **Exports from 0.1.0 failed `verify --bundle`** with "header was edited": 0.1.0 wrote blank
+  agent / fleet / start / call-count fields in receipt headers. They verify now, with a note, using
+  the signed body. Real edits (status, totals, kill fields, chain link, or a header only partly
+  blank) still fail.
+- **`hook --print-config` run from `npx` printed a path inside npx's temporary cache.** That hook
+  stops working when the cache is cleaned, and Claude Code and Codex then let tool calls through. It
+  now warns and says to install permanently first.
+- Signatures with stray bits in the base64 padding were accepted as the original; they are rejected.
+- `replay --step` printed `(v)` when a span had no policy version.
+- Scoped npm packages are private unless told otherwise: the launcher and platform packages now set
+  `publishConfig.access = public`. The platform packages also carry author, homepage and bugs fields.
+  The README said to publish four platform packages; there are six.
+
+#### Added
+- `warden about`.
+- Tests: a differential test (random command lines run through real `sh` and `bash` with stub programs:
+  about 16,000 distinct lines, 2,186 allowed by the policy and replayed in both shells, none ran a program off the allowlist; 4,053 of 30,854 in a longer one-off run); property tests for
+  redaction (every vendor format, buried in random text; idempotent; plain text unchanged); a byte-flip
+  test over real 0.1.0 / 0.1.x / 0.2.0 exports; golden files for replay (text, step, JSON) and OTLP; a
+  hostile-text test for the replay HTML; Windows-style path judgments; launcher pass-through; version
+  and maintainer pins. Real exports from three earlier builds are kept as upgrade fixtures.
+
 ### Round 3 (2026-11-07): attacker, performance, auditor, first-day user, competitor
 Found by a second hands-on panel (`reviews/round3.md` has the findings and the scored idea list).
 

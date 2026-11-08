@@ -14,7 +14,9 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -48,6 +50,9 @@ type Server struct {
 	mux    *http.ServeMux
 	tokens map[string]Role // secret -> role; empty = no auth
 	budget float64         // daily budget USD for the burn bar (0 = unset)
+	// localOnly: the server listens on a loopback address, so only loopback
+	// Host names are accepted (a defence against DNS rebinding).
+	localOnly bool
 }
 
 // Options configures the server.
@@ -58,13 +63,19 @@ type Options struct {
 	Engine    *anomaly.Engine
 	Tokens    map[string]Role
 	BudgetUSD float64
+	// LocalOnly is set when the listen address is loopback. Requests whose
+	// Host header is not localhost / 127.0.0.1 / ::1 are then refused: a web
+	// page on another site can make a browser send requests to 127.0.0.1
+	// under its own name (DNS rebinding) and would otherwise read traces and
+	// press the kill and approval buttons.
+	LocalOnly bool
 }
 
 // New builds the server.
 func New(o Options) *Server {
 	s := &Server{
 		st: o.Store, col: o.Collector, kills: o.Kills, engine: o.Engine,
-		tokens: o.Tokens, budget: o.BudgetUSD,
+		tokens: o.Tokens, budget: o.BudgetUSD, localOnly: o.LocalOnly,
 		mux: http.NewServeMux(),
 	}
 	s.routes()
@@ -89,7 +100,67 @@ func (s *Server) routes() {
 }
 
 // Handler returns the HTTP handler.
-func (s *Server) Handler() http.Handler { return s.mux }
+func (s *Server) Handler() http.Handler { return s.guard(s.mux) }
+
+// guard refuses requests a browser could be tricked into sending on a user's
+// behalf. It runs before authentication, in every mode.
+//
+//   - DNS rebinding: when listening on loopback only, the Host header must be
+//     a loopback name.
+//   - Cross-site requests: a request that changes state (anything but GET /
+//     HEAD) from a page is marked by the browser with an Origin header (even a
+//     "no-cors" form post). If it is present it must be this server's own
+//     origin. Command-line clients send no Origin and are unaffected.
+func (s *Server) guard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.localOnly && !loopbackHost(r.Host) {
+			http.Error(w, "refused: unexpected Host header (this dashboard answers on localhost only)", http.StatusForbidden)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if o := r.Header.Get("Origin"); o != "" {
+				u, err := url.Parse(o)
+				if err != nil || !strings.EqualFold(u.Host, r.Host) {
+					http.Error(w, "refused: cross-site request", http.StatusForbidden)
+					return
+				}
+			}
+			if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+				http.Error(w, "refused: cross-site request", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// loopbackHost reports whether a Host header names this machine's loopback.
+func loopbackHost(hostport string) bool {
+	h := hostport
+	if hh, _, err := net.SplitHostPort(hostport); err == nil {
+		h = hh
+	}
+	h = strings.Trim(h, "[]")
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
+// IsLoopbackListen reports whether a listen address binds loopback only.
+// ":8420" and "0.0.0.0:8420" bind every interface and are not loopback.
+func IsLoopbackListen(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
 
 // StartTicker runs anomaly evaluation + stale-run reconciliation in the background.
 func (s *Server) StartTicker(stop <-chan struct{}) {

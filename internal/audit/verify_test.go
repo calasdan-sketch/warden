@@ -3,6 +3,7 @@ package audit
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -265,5 +266,126 @@ func TestRunRowMustMatchSignedReceipt(t *testing.T) {
 	rep := Verify(its, s.PublicKey())
 	if !rep.OK() || len(rep.Notes) != 1 {
 		t.Errorf("a changed total should be a note, not a failure: ok=%v notes=%v", rep.OK(), rep.Notes)
+	}
+}
+
+// TestBundleWrittenByWarden010StillVerifies is an upgrade test: a real export
+// made by the 0.1.0 binary (testdata) left agent, fleet, operator, start time,
+// call count and trace digest blank in each receipt header. Strict header
+// checking used to report that as "header was edited". The signed body is
+// intact, so it must verify, with a note.
+func TestBundleWrittenByWarden010StillVerifies(t *testing.T) {
+	f, err := os.Open("testdata/bundle-0.1.0.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	b, err := ReadBundle(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := LoadPublicKey("testdata/bundle-0.1.0.pub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := VerifyBundle(b, pub)
+	if len(rep.Problems) != 0 || rep.Valid != rep.Receipts || rep.Receipts == 0 || !rep.ChainOK {
+		t.Fatalf("0.1.0 bundle should verify: %+v", rep)
+	}
+	if len(rep.Notes) == 0 {
+		t.Fatal("expected a note that the headers came from 0.1.0")
+	}
+	// A blank header must not let a real edit through: status is still compared.
+	for _, it := range b.Items {
+		if it.Receipt.Status == "completed" {
+			it.Receipt.Status = "failed"
+		}
+	}
+	if rep := VerifyBundle(b, pub); rep.OK() {
+		t.Fatal("editing the status of a legacy header must still fail")
+	}
+}
+
+func TestPartiallyBlankHeaderIsStillChecked(t *testing.T) {
+	s, _ := receipt.Generate()
+	items := buildChain(t, s, 1)
+	r := items[0].Receipt
+	r.AgentID, r.FleetID, r.Operator = "", "", ""
+	r.ToolCalls, r.SpanCount, r.SpansDigest = 0, 0, ""
+	// started_at left set: not the 0.1.0 shape, so the full comparison applies
+	// (and it must fail because the agent id was blanked).
+	if receipt.IsBlankLegacyHeader(r) {
+		t.Fatal("a header with a start time is not the legacy shape")
+	}
+	if err := receipt.MatchesBody(r, items[0].Body); err == nil {
+		t.Fatal("blanked fields with a start time must be reported")
+	}
+}
+
+func TestHeaderStatusAndCallsAreComparedToSignedBody(t *testing.T) {
+	s, _ := receipt.Generate()
+	items := buildChain(t, s, 1)
+	r := items[0].Receipt
+	r.Status = ""
+	if err := receipt.MatchesBody(r, items[0].Body); err == nil {
+		t.Fatal("an emptied status in the header must be reported")
+	}
+	// Only the call count is non-blank: not the 0.1.0 shape, full comparison.
+	items = buildChain(t, s, 1)
+	r = items[0].Receipt
+	r.AgentID, r.FleetID, r.Operator, r.SpansDigest = "", "", "", ""
+	r.StartedAt, r.SpanCount, r.GuardsEvaluated = time.Time{}, 0, nil
+	r.ToolCalls = 99
+	if receipt.IsBlankLegacyHeader(r) {
+		t.Fatal("a header that still shows a call count is not the 0.1.0 shape")
+	}
+	if err := receipt.MatchesBody(r, items[0].Body); err == nil {
+		t.Fatal("wrong call count must be reported")
+	}
+}
+
+// A signature re-encoded with different padding bits decodes to the same bytes
+// but is not the text warden wrote; both the receipt and the header reject it.
+func TestNonCanonicalSignatureEncodingIsRejected(t *testing.T) {
+	s, _ := receipt.Generate()
+	items := buildChain(t, s, 2)
+	raw := writeBundle(t, s, items)
+	if rep := verifyBundle(t, s, raw); !rep.OK() {
+		t.Fatalf("baseline must verify: %v", rep.Problems)
+	}
+	// Ed25519 signatures are 64 bytes: base64 ends "==", whose last character
+	// carries 2 data bits and 4 padding bits. Change a padding bit.
+	flip := func(sig string) string {
+		const abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+		i := strings.IndexByte(abc, sig[len(sig)-3])
+		return sig[:len(sig)-3] + string(abc[i^1]) + sig[len(sig)-2:]
+	}
+	for _, field := range []string{`"signature":"`} {
+		text := string(raw)
+		n := 0
+		for from := 0; ; {
+			k := strings.Index(text[from:], field)
+			if k < 0 {
+				break
+			}
+			start := from + k + len(field)
+			end := start + strings.IndexByte(text[start:], '"')
+			sig := text[start:end]
+			if strings.HasSuffix(sig, "==") {
+				mut := text[:start] + flip(sig) + text[end:]
+				bun, err := ReadBundle(strings.NewReader(mut))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if rep := VerifyBundle(bun, s.PublicKey()); rep.OK() {
+					t.Errorf("signature #%d with a changed padding bit verified", n)
+				}
+				n++
+			}
+			from = end
+		}
+		if n < 3 {
+			t.Fatalf("expected the header and two receipts, found %d signatures", n)
+		}
 	}
 }

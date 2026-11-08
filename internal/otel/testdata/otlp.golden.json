@@ -1,0 +1,247 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "a1"
+            }
+          },
+          {
+            "key": "gen_ai.agent.id",
+            "value": {
+              "stringValue": "a1"
+            }
+          },
+          {
+            "key": "warden.agent.id",
+            "value": {
+              "stringValue": "a1"
+            }
+          },
+          {
+            "key": "warden.fleet.id",
+            "value": {
+              "stringValue": "f1"
+            }
+          },
+          {
+            "key": "warden.run.id",
+            "value": {
+              "stringValue": "0123456789abcdef0123456789abcdef"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "warden",
+            "version": "test"
+          },
+          "spans": [
+            {
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.id",
+                  "value": {
+                    "stringValue": "a1"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "a1"
+                  }
+                },
+                {
+                  "key": "warden.run.status",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "warden.cost.usd",
+                  "value": {
+                    "doubleValue": 0
+                  }
+                },
+                {
+                  "key": "warden.tool_calls",
+                  "value": {
+                    "intValue": "0"
+                  }
+                }
+              ],
+              "endTimeUnixNano": "1792324803000000000",
+              "kind": 1,
+              "name": "invoke_agent a1",
+              "spanId": "b996bcf06768e61f",
+              "startTimeUnixNano": "1792324800000000000",
+              "status": {
+                "code": 1
+              },
+              "traceId": "0123456789abcdef0123456789abcdef"
+            },
+            {
+              "attributes": [
+                {
+                  "key": "warden.span.kind",
+                  "value": {
+                    "stringValue": "llm.call"
+                  }
+                },
+                {
+                  "key": "warden.policy.decision",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "warden.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "m"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "10"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "5"
+                  }
+                },
+                {
+                  "key": "warden.cost.usd",
+                  "value": {
+                    "doubleValue": 0
+                  }
+                }
+              ],
+              "endTimeUnixNano": "1792324800000000000",
+              "kind": 3,
+              "name": "chat m",
+              "parentSpanId": "b996bcf06768e61f",
+              "spanId": "aaaa0000bbbb1111",
+              "startTimeUnixNano": "1792324800000000000",
+              "status": {
+                "code": 1
+              },
+              "traceId": "0123456789abcdef0123456789abcdef"
+            },
+            {
+              "attributes": [
+                {
+                  "key": "warden.span.kind",
+                  "value": {
+                    "stringValue": "tool.call"
+                  }
+                },
+                {
+                  "key": "warden.policy.decision",
+                  "value": {
+                    "stringValue": "deny"
+                  }
+                },
+                {
+                  "key": "warden.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "warden.policy.reason",
+                  "value": {
+                    "stringValue": "denied by pattern"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "bash"
+                  }
+                },
+                {
+                  "key": "warden.tool.name",
+                  "value": {
+                    "stringValue": "bash"
+                  }
+                },
+                {
+                  "key": "warden.tool.server",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "warden.tool.args_summary",
+                  "value": {
+                    "stringValue": "rm -rf /"
+                  }
+                },
+                {
+                  "key": "warden.tool.exit_status",
+                  "value": {
+                    "intValue": "0"
+                  }
+                }
+              ],
+              "endTimeUnixNano": "1792324800000000000",
+              "kind": 1,
+              "name": "execute_tool bash",
+              "parentSpanId": "b996bcf06768e61f",
+              "spanId": "eeee0000ffff1111",
+              "startTimeUnixNano": "1792324800000000000",
+              "status": {
+                "code": 1
+              },
+              "traceId": "0123456789abcdef0123456789abcdef"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
